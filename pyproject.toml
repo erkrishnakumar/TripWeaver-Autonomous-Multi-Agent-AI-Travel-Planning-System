@@ -1,0 +1,53 @@
+[project]
+name = "tripweaver"
+version = "0.1.0"
+description = "Autonomous multi-agent travel planning system with a human approval gate"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "httpx>=0.27",
+    "tenacity>=8.3",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+agents = [
+    "crewai>=0.80",
+]
+mcp = [
+    "fastmcp>=0.3",
+]
+api = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "asyncpg>=0.29",
+]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-httpx>=0.30",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
