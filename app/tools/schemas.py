@@ -79,6 +79,7 @@ class FlightSearchResult(BaseModel):
     offers: list[FlightOffer]
     provider: str = "duffel"
     is_sandbox: bool = True
+    is_mock: bool = False
 
 
 class ToolError(BaseModel):

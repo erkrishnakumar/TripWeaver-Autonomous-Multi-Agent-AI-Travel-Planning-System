@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: tripweaver-postgres
+
+    environment:
+      POSTGRES_USER: tripweaver
+      POSTGRES_PASSWORD: tripweaver
+      POSTGRES_DB: tripweaver
+
+    ports:
+      - "5435:5432"
+
+    volumes:
+      - tripweaver_postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tripweaver -d tripweaver"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+    restart: unless-stopped
+
+volumes:
+  tripweaver_postgres_data:

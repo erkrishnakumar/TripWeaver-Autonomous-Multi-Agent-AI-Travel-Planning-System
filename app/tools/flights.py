@@ -6,9 +6,16 @@ Wraps the Duffel Offer Request API. Kept as a plain typed Python function
   - unit tested in isolation (see tests/test_flights.py)
   - reused directly by the API layer
   - wrapped separately by both CrewAI and FastMCP without duplicating logic
+
+Set USE_MOCK_DATA=true in .env to return local fixture data instead of
+calling the real Duffel sandbox — use this for iteration/demos so you don't
+depend on network access or burn real sandbox calls.
 """
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import httpx
 from tenacity import (
@@ -18,8 +25,8 @@ from tenacity import (
     wait_exponential,
 )
 
-from tools.config import settings
-from tools.schemas import (
+from app.config import settings
+from app.tools.schemas import (
     FlightOffer,
     FlightSearchInput,
     FlightSearchResult,
@@ -27,9 +34,8 @@ from tools.schemas import (
     ToolError,
 )
 
-# Errors worth retrying: network blips and Duffel rate limiting.
-# Errors NOT worth retrying: bad input (4xx other than 429), auth failure.
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_FIXTURES_PATH = Path(__file__).parent / "fixtures" / "flight_offers.json"
 
 
 class DuffelAPIError(Exception):
@@ -115,47 +121,65 @@ def _post_offer_request(payload: dict) -> dict:
     return resp.json()
 
 
+def _load_mock_offers(query: FlightSearchInput) -> list[dict]:
+    with open(_FIXTURES_PATH) as f:
+        fixtures = json.load(f)
+    key = f"{query.origin}-{query.destination}"
+    return fixtures.get(key, fixtures["DEFAULT"])
+
+
 def search_flights(query: FlightSearchInput) -> FlightSearchResult | ToolError:
     """
-    Search for flight offers via the Duffel sandbox.
+    Search for flight offers.
 
     Returns FlightSearchResult on success, or ToolError on failure so callers
     (agents, API handlers) can branch on outcome without a try/except around
     every call site.
+
+    Behavior depends on settings.use_mock_data:
+      - True:  returns local fixture data, no network call, always succeeds
+      - False: calls the real Duffel sandbox (requires DUFFEL_API_KEY)
     """
-    settings.validate_duffel()
-    payload = _build_offer_request_payload(query)
-
-    try:
-        raw = _post_offer_request(payload)
-    except DuffelAPIError as e:
-        return ToolError(
-            tool_name="search_flights",
-            error_type="duffel_api_error",
-            message=e.message,
-            retryable=e.retryable,
-        )
-    except httpx.TimeoutException:
-        return ToolError(
-            tool_name="search_flights",
-            error_type="timeout",
-            message="Duffel API did not respond within 15s",
-            retryable=True,
-        )
-
-    offers_raw = raw.get("data", {}).get("offers", [])
-    offers = [_parse_offer(o) for o in offers_raw]
+    if settings.use_mock_data:
+        offers_raw = _load_mock_offers(query)
+        offers = [_parse_offer(o) for o in offers_raw]
+        is_mock = True
+    else:
+        settings.validate_duffel()
+        payload = _build_offer_request_payload(query)
+        try:
+            raw = _post_offer_request(payload)
+        except DuffelAPIError as e:
+            return ToolError(
+                tool_name="search_flights",
+                error_type="duffel_api_error",
+                message=e.message,
+                retryable=e.retryable,
+            )
+        except httpx.TimeoutException:
+            return ToolError(
+                tool_name="search_flights",
+                error_type="timeout",
+                message="Duffel API did not respond within 15s",
+                retryable=True,
+            )
+        offers_raw = raw.get("data", {}).get("offers", [])
+        offers = [_parse_offer(o) for o in offers_raw]
+        is_mock = False
 
     if query.max_budget_usd is not None:
         offers = [o for o in offers if o.total_price_usd <= query.max_budget_usd]
 
     offers.sort(key=lambda o: o.total_price_usd)
 
-    return FlightSearchResult(query=query, offers=offers, provider="duffel", is_sandbox=True)
+    return FlightSearchResult(
+        query=query, offers=offers, provider="duffel", is_sandbox=True, is_mock=is_mock
+    )
 
 
 if __name__ == "__main__":
-    # Manual smoke test: run `uv run python -m tools.flights`
+    # Manual smoke test: run `uv run python -m app.tools.flights`
+    # Add USE_MOCK_DATA=true to .env to test without hitting the real API.
     from datetime import date, timedelta
 
     demo_query = FlightSearchInput(
@@ -169,6 +193,6 @@ if __name__ == "__main__":
     if isinstance(result, ToolError):
         print(f"[ERROR] {result.error_type}: {result.message}")
     else:
-        print(f"Found {len(result.offers)} offers (sandbox={result.is_sandbox}):")
+        print(f"Found {len(result.offers)} offers (mock={result.is_mock}):")
         for offer in result.offers[:5]:
             print(f"  {offer.offer_id}: ${offer.total_price_usd} — {len(offer.segments)} segment(s)")

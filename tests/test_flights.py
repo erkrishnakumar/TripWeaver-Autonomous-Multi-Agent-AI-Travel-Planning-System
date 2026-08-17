@@ -1,5 +1,5 @@
 """
-Unit tests for tools/flights.py.
+Unit tests for app/tools/flights.py.
 
 These never hit the real Duffel API — httpx calls are mocked via pytest-httpx.
 This means CI can run them with zero secrets and zero network flakiness.
@@ -9,8 +9,8 @@ from datetime import date, timedelta
 
 import pytest
 
-from tools.flights import search_flights
-from tools.schemas import FlightSearchInput, FlightSearchResult, ToolError
+from app.tools.flights import search_flights
+from app.tools.schemas import FlightSearchInput, FlightSearchResult, ToolError
 
 MOCK_OFFER_RESPONSE = {
     "data": {
@@ -72,9 +72,20 @@ def query() -> FlightSearchInput:
     )
 
 
+@pytest.fixture(autouse=True)
+def _force_real_api_mode():
+    """Most tests exercise the Duffel code path, so force mock mode off by
+    default. The dedicated mock-mode tests below turn it back on explicitly."""
+    from app import config
+
+    config.settings.use_mock_data = False
+    yield
+    config.settings.use_mock_data = False
+
+
 def test_returns_offers_sorted_by_price(httpx_mock, query, monkeypatch):
     monkeypatch.setenv("DUFFEL_API_KEY", "duffel_test_fake_key")
-    from tools import config
+    from app import config
 
     config.settings.duffel_api_key = "duffel_test_fake_key"
 
@@ -87,6 +98,7 @@ def test_returns_offers_sorted_by_price(httpx_mock, query, monkeypatch):
     result = search_flights(query)
 
     assert isinstance(result, FlightSearchResult)
+    assert result.is_mock is False
     assert len(result.offers) == 2
     # Cheaper offer should be first
     assert result.offers[0].total_price_usd == 450.00
@@ -100,7 +112,7 @@ def test_origin_is_uppercased(query):
 
 
 def test_budget_filter_excludes_expensive_offers(httpx_mock, monkeypatch):
-    from tools import config
+    from app import config
 
     config.settings.duffel_api_key = "duffel_test_fake_key"
 
@@ -124,7 +136,7 @@ def test_budget_filter_excludes_expensive_offers(httpx_mock, monkeypatch):
 
 
 def test_api_error_returns_tool_error_not_exception(httpx_mock, monkeypatch, query):
-    from tools import config
+    from app import config
 
     config.settings.duffel_api_key = "duffel_test_fake_key"
 
@@ -152,9 +164,39 @@ def test_rejects_return_date_before_depart_date():
 
 
 def test_missing_api_key_raises_clear_error(monkeypatch, query):
-    from tools import config
+    from app import config
 
     config.settings.duffel_api_key = ""
 
     with pytest.raises(RuntimeError, match="DUFFEL_API_KEY is not set"):
         search_flights(query)
+
+
+def test_mock_mode_returns_fixture_data_with_no_network_call(query):
+    """No httpx_mock fixture used here on purpose — if the code accidentally
+    tried a real network call in mock mode, this test would hang/fail."""
+    from app import config
+
+    config.settings.use_mock_data = True
+
+    result = search_flights(query)
+
+    assert isinstance(result, FlightSearchResult)
+    assert result.is_mock is True
+    assert len(result.offers) > 0
+
+
+def test_mock_mode_falls_back_to_default_for_unknown_route():
+    from app import config
+
+    config.settings.use_mock_data = True
+
+    query = FlightSearchInput(
+        origin="XXX",
+        destination="YYY",
+        depart_date=date.today() + timedelta(days=30),
+    )
+    result = search_flights(query)
+
+    assert isinstance(result, FlightSearchResult)
+    assert result.offers[0].offer_id == "mock_off_generic_001"

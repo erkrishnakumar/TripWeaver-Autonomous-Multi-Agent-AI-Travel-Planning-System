@@ -18,8 +18,10 @@ class Settings:
     duffel_base_url: str = "https://api.duffel.com"
     duffel_api_version: str = "v2"
 
+    use_mock_data: bool = os.environ.get("USE_MOCK_DATA", "false").lower() in ("1", "true", "yes")
+
     database_url: str = os.environ.get(
-        "DATABASE_URL", "postgresql://tripweaver:tripweaver@localhost:5432/tripweaver"
+        "DATABASE_URL", "postgresql://tripweaver:tripweaver@localhost:5435/tripweaver"
     )
 
     ollama_base_url: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -29,13 +31,12 @@ class Settings:
         if not self.duffel_api_key:
             raise RuntimeError(
                 "DUFFEL_API_KEY is not set. Copy .env.example to .env and add your "
-                "sandbox token from https://app.duffel.com/join"
+                "sandbox token from https://app.duffel.com/join (Developers > Access tokens)."
             )
         if not self.duffel_api_key.startswith("duffel_test_"):
             raise RuntimeError(
                 "DUFFEL_API_KEY does not look like a sandbox token "
-                "(expected it to start with 'duffel_test_'). Refusing to run against "
-                "a possible live token from this script."
+                "(expected it to start with 'duffel_test_')."
             )
 
 
