@@ -20,3 +20,8 @@ __pycache__/
 
 # Logs
 *.log
+
+docs/
+docs/_build/
+.docs/
+.docs*

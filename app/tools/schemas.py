@@ -244,6 +244,8 @@ class ToolError(BaseModel):
     error_type: str
     message: str
     retryable: bool = False
+
+
 class TravelPurpose(str, Enum):
     TOURISM = "tourism"
     BUSINESS = "business"
@@ -298,6 +300,8 @@ class VisaCheckResult(BaseModel):
     )
     provider: str = "groq"
     model: str
+
+
 class ProposeFlightBookingInput(BaseModel):
     """Input contract for propose_booking() when booking_type is FLIGHT.
 
@@ -346,3 +350,29 @@ class ProposeBookingResult(BaseModel):
             "same trip+offer (idempotent replay), rather than creating a new one."
         )
     )
+
+
+class TripSummary(BaseModel):
+    """Output contract for create_trip() when exposed via the MCP server (and,
+    later, the API layer).
+
+    app.tools.create_trip.create_trip() returns a live SQLAlchemy Trip ORM
+    object, which is only safely readable while its owning session is open
+    and isn't a JSON-serializable shape a client should ever depend on
+    directly. This mirrors Trip's public, non-relationship columns as a
+    plain schema — the same "define it here first" principle as every other
+    contract in this file. Deliberately excludes Trip.notes and the
+    relationship collections (itineraries/flight_options/hotel_options/
+    bookings): those are internal/future-facing, not part of what
+    create_trip() hands back today.
+    """
+
+    id: str
+    status: str
+    origin_iata: str
+    destination_iata: str
+    depart_date: date
+    return_date: date | None = None
+    adults: int
+    max_budget_usd: float | None = None
+    requester_email: str | None = None
