@@ -57,3 +57,15 @@ tripweaver/
 - [ ] Phase 7: CI evals
 - [ ] Phase 8: API layer
 - [ ] Phase 9: deployment
+
+
+
+
+## To test the weather.py and flights.py
+uv run python -m pytest tests/test_weather.py tests/test_flights.py -v
+
+## To run all the tests present in all the test files
+uv run python -m pytest tests -v
+
+## if one package needs to be installed
+uv add groq

@@ -4,7 +4,6 @@
       "id": "mock_off_jfk_atl_001",
       "total_amount": "412.50",
       "total_currency": "USD",
-      "cabin_class": "economy",
       "expires_at": "2099-01-01T00:00:00Z",
       "slices": [
         {
@@ -15,7 +14,8 @@
               "origin": {"iata_code": "JFK"},
               "destination": {"iata_code": "ATL"},
               "departing_at": "2026-09-14T08:15:00",
-              "arriving_at": "2026-09-14T10:47:00"
+              "arriving_at": "2026-09-14T10:47:00",
+              "passengers": [{"passenger_id": "passenger_0", "cabin_class": "economy"}]
             }
           ]
         }
@@ -25,7 +25,6 @@
       "id": "mock_off_jfk_atl_002",
       "total_amount": "289.00",
       "total_currency": "USD",
-      "cabin_class": "economy",
       "expires_at": "2099-01-01T00:00:00Z",
       "slices": [
         {
@@ -36,7 +35,8 @@
               "origin": {"iata_code": "JFK"},
               "destination": {"iata_code": "ATL"},
               "departing_at": "2026-09-14T14:05:00",
-              "arriving_at": "2026-09-14T16:40:00"
+              "arriving_at": "2026-09-14T16:40:00",
+              "passengers": [{"passenger_id": "passenger_0", "cabin_class": "economy"}]
             }
           ]
         }
@@ -48,7 +48,6 @@
       "id": "mock_off_del_bkk_001",
       "total_amount": "245.00",
       "total_currency": "USD",
-      "cabin_class": "economy",
       "expires_at": "2099-01-01T00:00:00Z",
       "slices": [
         {
@@ -59,7 +58,8 @@
               "origin": {"iata_code": "DEL"},
               "destination": {"iata_code": "BKK"},
               "departing_at": "2026-10-02T23:55:00",
-              "arriving_at": "2026-10-03T06:10:00"
+              "arriving_at": "2026-10-03T06:10:00",
+              "passengers": [{"passenger_id": "passenger_0", "cabin_class": "economy"}]
             }
           ]
         }
@@ -71,7 +71,6 @@
       "id": "mock_off_generic_001",
       "total_amount": "375.00",
       "total_currency": "USD",
-      "cabin_class": "economy",
       "expires_at": "2099-01-01T00:00:00Z",
       "slices": [
         {
@@ -82,7 +81,8 @@
               "origin": {"iata_code": "XXX"},
               "destination": {"iata_code": "YYY"},
               "departing_at": "2026-09-01T09:00:00",
-              "arriving_at": "2026-09-01T13:00:00"
+              "arriving_at": "2026-09-01T13:00:00",
+              "passengers": [{"passenger_id": "passenger_0", "cabin_class": "economy"}]
             }
           ]
         }

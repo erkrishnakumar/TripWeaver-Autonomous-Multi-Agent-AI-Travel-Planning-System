@@ -6,27 +6,21 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import JSON, String
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import JSON, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-
-# Use JSONB on PostgreSQL and JSON on other databases such as SQLite.
 variant_json = JSON().with_variant(JSONB, "postgresql")
 
-
+# sqlalchemy.Uuid (not dialects.postgresql.UUID) correctly handles both:
+# native UUID storage on Postgres, and a string-based fallback on SQLite/
+# other dialects — with the Python-side UUID<->str conversion built in for
+# both. The Postgres-specific UUID type only has that conversion on
+# Postgres; on SQLite it silently degrades to a bare String column with no
+# conversion, which breaks the moment a real uuid.UUID object is inserted.
 def uuid_pk() -> Mapped[uuid.UUID]:
-    """
-    Reusable UUID primary-key definition.
-
-    PostgreSQL:
-        Uses native UUID.
-
-    SQLite:
-        Falls back to String(36) for local/dev testing.
-    """
     return mapped_column(
-        UUID(as_uuid=True).with_variant(String(36), "sqlite"),
+        Uuid(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
     )

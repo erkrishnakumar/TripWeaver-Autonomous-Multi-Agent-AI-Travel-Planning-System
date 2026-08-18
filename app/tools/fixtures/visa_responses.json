@@ -1,0 +1,18 @@
+{
+  "INDIA-THAILAND": {
+    "visa_required": false,
+    "summary": "Indian passport holders can generally enter Thailand visa-free for short tourist stays under current visa-exemption arrangements, though rules have changed periodically."
+  },
+  "INDIA-UNITED STATES": {
+    "visa_required": true,
+    "summary": "Indian passport holders generally need a visa (such as a B1/B2 tourist/business visa) to enter the United States; there is no visa-waiver program for Indian citizens."
+  },
+  "UNITED STATES-FRANCE": {
+    "visa_required": false,
+    "summary": "US passport holders can generally enter France and the wider Schengen Area visa-free for short tourist stays, typically up to 90 days within a 180-day period."
+  },
+  "DEFAULT": {
+    "visa_required": null,
+    "summary": "This is a mock response with no specific route data available — in mock mode, unrecognized passport/destination combinations return an unknown result rather than guessing."
+  }
+}

@@ -11,7 +11,7 @@ avoids messy/duplicate migrations later.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, UTC
 
 from sqlalchemy import MetaData
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -33,10 +33,10 @@ class TimestampMixin:
     """Shared created_at/updated_at columns for every table that wants them."""
 
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.utcnow(), nullable=False
+        default=lambda: datetime.now(UTC), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.utcnow(),
-        onupdate=lambda: datetime.utcnow(),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
         nullable=False,
     )

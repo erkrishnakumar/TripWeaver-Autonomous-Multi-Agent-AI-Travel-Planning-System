@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -70,6 +70,30 @@ def _build_offer_request_payload(query: FlightSearchInput) -> dict:
     }
 
 
+def _extract_cabin_class(raw: dict) -> str:
+    """Cabin class lives per-passenger, per-segment in Duffel's real Offer
+    schema (slices[].segments[].passengers[].cabin_class) — verified
+    against Duffel's own Offers schema docs. There is no top-level
+    cabin_class field on an offer; the previous code guessed one existed
+    and silently defaulted every offer to "economy" as a result.
+
+    Multiple passengers/segments could technically have different cabin
+    classes on a mixed-cabin itinerary; we take the first outbound
+    segment's first passenger as representative, which matches what
+    search_flights() actually requested (a single cabin_class for the
+    whole search)."""
+    slices = raw.get("slices", [])
+    if not slices:
+        return "economy"
+    segments = slices[0].get("segments", [])
+    if not segments:
+        return "economy"
+    passengers = segments[0].get("passengers", [])
+    if not passengers:
+        return "economy"
+    return passengers[0].get("cabin_class", "economy")
+
+
 def _parse_offer(raw: dict) -> FlightOffer:
     segments: list[FlightSegment] = []
     stops_outbound = 0
@@ -93,17 +117,23 @@ def _parse_offer(raw: dict) -> FlightOffer:
         offer_id=raw["id"],
         total_price_usd=float(raw["total_amount"]),
         price_currency_original=raw.get("total_currency", "USD"),
-        cabin_class=raw.get("cabin_class", "economy"),
+        cabin_class=_extract_cabin_class(raw),
         stops_outbound=stops_outbound,
         segments=segments,
         expires_at=raw.get("expires_at"),
     )
 
 
+def _is_retryable_duffel_error(exc: BaseException) -> bool:
+    """Only retry Duffel errors explicitly flagged retryable (429/5xx) —
+    never retry on 4xx client errors like bad auth or malformed payloads."""
+    return isinstance(exc, DuffelAPIError) and exc.retryable
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=8),
-    retry=retry_if_exception_type(DuffelAPIError) and (lambda e: getattr(e, "retryable", False)),
+    retry=retry_if_exception(_is_retryable_duffel_error),
     reraise=True,
 )
 def _post_offer_request(payload: dict) -> dict:
@@ -145,7 +175,15 @@ def search_flights(query: FlightSearchInput) -> FlightSearchResult | ToolError:
         offers = [_parse_offer(o) for o in offers_raw]
         is_mock = True
     else:
-        settings.validate_duffel()
+        try:
+            settings.validate_duffel()
+        except RuntimeError as e:
+            return ToolError(
+                tool_name="search_flights",
+                error_type="config_error",
+                message=str(e),
+                retryable=False,
+            )
         payload = _build_offer_request_payload(query)
         try:
             raw = _post_offer_request(payload)

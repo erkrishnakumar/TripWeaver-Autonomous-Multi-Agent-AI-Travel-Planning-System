@@ -1,0 +1,108 @@
+{
+  "ATLANTA": [
+    {
+      "id": "srr_mock_atl_001",
+      "cheapest_rate_total_amount": "540.00",
+      "cheapest_rate_currency": "USD",
+      "check_in_date": "2026-09-14",
+      "check_out_date": "2026-09-17",
+      "expires_at": "2099-01-01T00:00:00Z",
+      "accommodation": {
+        "id": "acc_mock_atl_001",
+        "name": "Peachtree Grand Hotel",
+        "rating": 4,
+        "review_score": 8.6,
+        "review_count": 512,
+        "location": {
+          "geographic_coordinates": {"latitude": 33.749, "longitude": -84.388},
+          "address": {
+            "line_one": "210 Peachtree St NW",
+            "city_name": "Atlanta",
+            "region": "Georgia",
+            "postal_code": "30303",
+            "country_code": "US"
+          }
+        }
+      }
+    },
+    {
+      "id": "srr_mock_atl_002",
+      "cheapest_rate_total_amount": "312.00",
+      "cheapest_rate_currency": "USD",
+      "check_in_date": "2026-09-14",
+      "check_out_date": "2026-09-17",
+      "expires_at": "2099-01-01T00:00:00Z",
+      "accommodation": {
+        "id": "acc_mock_atl_002",
+        "name": "Midtown Budget Inn",
+        "rating": 3,
+        "review_score": 7.1,
+        "review_count": 208,
+        "location": {
+          "geographic_coordinates": {"latitude": 33.782, "longitude": -84.383},
+          "address": {
+            "line_one": "88 14th St NE",
+            "city_name": "Atlanta",
+            "region": "Georgia",
+            "postal_code": "30309",
+            "country_code": "US"
+          }
+        }
+      }
+    }
+  ],
+  "BANGKOK": [
+    {
+      "id": "srr_mock_bkk_001",
+      "cheapest_rate_total_amount": "210.00",
+      "cheapest_rate_currency": "USD",
+      "check_in_date": "2026-10-02",
+      "check_out_date": "2026-10-05",
+      "expires_at": "2099-01-01T00:00:00Z",
+      "accommodation": {
+        "id": "acc_mock_bkk_001",
+        "name": "Chao Phraya Riverside Hotel",
+        "rating": 5,
+        "review_score": 9.1,
+        "review_count": 1204,
+        "location": {
+          "geographic_coordinates": {"latitude": 13.7563, "longitude": 100.5018},
+          "address": {
+            "line_one": "48 Charoen Krung Rd",
+            "city_name": "Bangkok",
+            "region": "Bangkok",
+            "postal_code": "10500",
+            "country_code": "TH"
+          }
+        }
+      }
+    }
+  ],
+  "DEFAULT": [
+    {
+      "id": "srr_mock_generic_001",
+      "cheapest_rate_total_amount": "300.00",
+      "cheapest_rate_currency": "USD",
+      "check_in_date": "2026-09-01",
+      "check_out_date": "2026-09-04",
+      "expires_at": "2099-01-01T00:00:00Z",
+      "accommodation": {
+        "id": "acc_mock_generic_001",
+        "name": "Duffel Test Hotel",
+        "rating": 3,
+        "review_score": 8.0,
+        "review_count": 100,
+        "location": {
+          "geographic_coordinates": {"latitude": 0.0, "longitude": 0.0},
+          "address": {
+            "line_one": "100 Test Street",
+            "city_name": "Testville",
+            "region": "Test Region",
+            "postal_code": "00000",
+            "country_code": "XX"
+          }
+        }
+      }
+    }
+  ]
+}
