@@ -11,7 +11,7 @@ Not started yet — see README.md at repo root for phase checklist.
 Phase 2 — done. Wraps the tool layer as a FastMCP (v3.4.7) server, runnable
 as a standalone process separate from the agent runtime.
 
-## Tools exposed (7, not 5)
+## Tools exposed (8, not 5)
 
 | Tool | Wraps | Backing |
 |---|---|---|
@@ -19,11 +19,12 @@ as a standalone process separate from the agent runtime.
 | `get_weather_forecast` | `app.tools.weather.get_weather_forecast` | Open-Meteo |
 | `search_hotels` | `app.tools.hotels.search_hotels` | Duffel Stays (or fixtures) |
 | `check_visa_requirements` | `app.tools.visa.check_visa_requirements` | Groq (or fixtures) |
+| `estimate_ground_transport` | `app.tools.ground_transport.estimate_ground_transport` | None — local math only |
 | `create_trip` | `app.tools.create_trip.create_trip` | Postgres |
 | `propose_flight_booking` | `app.tools.propose_booking.propose_booking` | Postgres |
 | `propose_hotel_booking` | `app.tools.propose_booking.propose_booking` | Postgres |
 
-Two deliberate departures from the original "five tools" framing:
+Three deliberate departures from the original "five tools" framing:
 
 - **`create_trip` is exposed.** An MCP client needs a `trip_id` before it
   can call either `propose_*_booking` tool — without `create_trip` this
@@ -34,6 +35,44 @@ Two deliberate departures from the original "five tools" framing:
   calling agent would see one ambiguous input instead of two clearly-typed
   tools. `propose_flight_booking` / `propose_hotel_booking` mirror the two
   `*BookingInput` models that already exist in `schemas.py`.
+- **`estimate_ground_transport` was added later (Phase 2.1)**, for a
+  different reason than the other two — see below.
+
+## Why `estimate_ground_transport` exists, and why it's not a real booking
+
+TripWeaver does **not** integrate a ride-hailing API for legs like
+home→airport or airport→hotel. Two real options were evaluated and
+rejected before building this:
+
+- **Duffel Cars** — a real Duffel product (launched April 2026) covering
+  Avis/Hertz/Sixt/Enterprise/Europcar. But it's **self-drive car rental**
+  (you take the keys and drive yourself), not a chauffeured transfer.
+  Using it for a one-off airport hop is technically possible (Duffel Cars
+  supports one-way rentals with different pickup/drop-off locations) but
+  practically wrong — nobody rents a car just to get dropped at a rental
+  counter.
+- **Real ride-hailing APIs** — Ola and Rapido have no public booking API
+  at all. Uber's requires an enterprise partnership (Uber for Business /
+  Guest Rides), not a self-serve sandbox token like Duffel's.
+
+Since neither fits, `estimate_ground_transport` gives a **rough, clearly
+disclaimed cost estimate** instead — same principle as
+`check_visa_requirements()` returning an informational-only answer where
+no authoritative source exists, rather than faking precision it doesn't
+have. It:
+
+- Reuses `geocode_city()` — the same geocoding path `weather.py` and
+  `hotels.py` already use — for any city-name input.
+- Computes straight-line (haversine) distance with a rough road-distance
+  correction factor — no routing API, since this is explicitly an
+  estimate, not a quote.
+- Returns a **range** (`estimated_cost_usd_low`/`estimated_cost_usd_high`),
+  not a single falsely-precise number.
+- Has **no approval-gate counterpart** — unlike every other stateful tool
+  here, there's nothing to approve, because nothing is ever bookable. No
+  DB writes, no new `BookingType`.
+- Is the only tool in this server with **zero external API dependency** —
+  no Duffel, no Groq, no new API key required.
 
 ## Error handling
 
@@ -57,7 +96,8 @@ with no exceptions; see the module docstring there and
 `create_trip`, `propose_flight_booking`, and `propose_hotel_booking` each
 open their own `async with get_session()` block per call and commit within
 that same call — session-per-call, not a session held open across this
-(long-running) server process's lifetime.
+(long-running) server process's lifetime. `estimate_ground_transport`
+opens no session at all — it never touches the database.
 
 ## Running it
 

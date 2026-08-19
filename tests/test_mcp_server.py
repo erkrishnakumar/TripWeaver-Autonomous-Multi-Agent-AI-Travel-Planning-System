@@ -38,12 +38,12 @@ from datetime import date, timedelta
 
 import pytest
 import pytest_asyncio
+from app.db.base import Base
 from fastmcp import Client
 from fastmcp.exceptions import ToolError as MCPToolError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.mcp_server.server as server_module
-from app.db.base import Base
 from app.tools.schemas import (
     CabinClass,
     DailyForecast,
@@ -482,13 +482,61 @@ class TestProposeHotelBookingTool:
                 )
 
 
+class TestEstimateGroundTransportTool:
+    async def test_success_returns_estimate(self, monkeypatch):
+        from app.tools.schemas import GroundTransportEstimateResult
+
+        fake_result = GroundTransportEstimateResult(
+            origin_resolved_name="Home",
+            origin_latitude=40.6413,
+            origin_longitude=-73.7781,
+            destination_resolved_name="JFK Airport",
+            destination_latitude=40.6413,
+            destination_longitude=-73.7781,
+            distance_km=15.0,
+            estimated_cost_usd_low=8.0,
+            estimated_cost_usd_high=14.0,
+        )
+        monkeypatch.setattr(
+            server_module, "_estimate_ground_transport", lambda query: fake_result
+        )
+
+        async with Client(server_module.mcp) as client:
+            result = await client.call_tool(
+                "estimate_ground_transport",
+                {"query": {"origin_city": "Home", "destination_city": "JFK Airport"}},
+            )
+
+        assert result.data.distance_km == 15.0
+        assert "NOT a real fare" in result.data.disclaimer
+
+    async def test_location_not_found_is_raised_with_real_message(self, monkeypatch):
+        monkeypatch.setattr(
+            server_module,
+            "_estimate_ground_transport",
+            lambda query: DomainToolError(
+                tool_name="estimate_ground_transport",
+                error_type="location_not_found",
+                message="Couldn't find a origin location matching 'Nowhereville'.",
+                retryable=False,
+            ),
+        )
+
+        async with Client(server_module.mcp) as client:
+            with pytest.raises(MCPToolError, match="location_not_found"):
+                await client.call_tool(
+                    "estimate_ground_transport",
+                    {"query": {"origin_city": "Nowhereville", "destination_city": "JFK Airport"}},
+                )
+
+
 # ---------------------------------------------------------------------------
 # Server-wide sanity
 # ---------------------------------------------------------------------------
 
 
 class TestServerRegistration:
-    async def test_all_seven_tools_are_registered(self):
+    async def test_all_eight_tools_are_registered(self):
         async with Client(server_module.mcp) as client:
             tools = await client.list_tools()
 
@@ -498,6 +546,7 @@ class TestServerRegistration:
             "get_weather_forecast",
             "search_hotels",
             "check_visa_requirements",
+            "estimate_ground_transport",
             "create_trip",
             "propose_flight_booking",
             "propose_hotel_booking",

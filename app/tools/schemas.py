@@ -376,3 +376,92 @@ class TripSummary(BaseModel):
     adults: int
     max_budget_usd: float | None = None
     requester_email: str | None = None
+
+
+class GroundTransportEstimateInput(BaseModel):
+    """Input contract for estimate_ground_transport().
+
+    Two arbitrary points — e.g. "home" and an airport, or an airport and a
+    hotel — each specified as EITHER a place/city name OR explicit lat/lon,
+    same convention as WeatherSearchInput/HotelSearchInput.
+
+    This is deliberately NOT a bookable request. TripWeaver does not
+    integrate a ride-hailing API for these legs: Ola and Rapido have no
+    public booking API at all, and Uber's requires an enterprise
+    partnership (Uber for Business / Guest Rides), not a self-serve
+    sandbox token like Duffel's. Duffel Cars was also considered and
+    rejected for this use case — it's self-drive car RENTAL (Avis/Hertz/
+    Sixt/etc.), not a chauffeured point-to-point transfer; using it to get
+    dropped at an airport counter would be technically possible but
+    practically wrong. Given no real booking API fits, this tool only ever
+    returns a rough, disclaimed cost estimate.
+    """
+
+    origin_city: str | None = Field(default=None, min_length=1)
+    origin_latitude: float | None = Field(default=None, ge=-90, le=90)
+    origin_longitude: float | None = Field(default=None, ge=-180, le=180)
+
+    destination_city: str | None = Field(default=None, min_length=1)
+    destination_latitude: float | None = Field(default=None, ge=-90, le=90)
+    destination_longitude: float | None = Field(default=None, ge=-180, le=180)
+
+    @model_validator(mode="after")
+    def exactly_one_origin_location(self) -> "GroundTransportEstimateInput":
+        has_city = self.origin_city is not None
+        has_coords = self.origin_latitude is not None and self.origin_longitude is not None
+        partial_coords = (self.origin_latitude is None) != (self.origin_longitude is None)
+
+        if partial_coords:
+            raise ValueError("origin_latitude and origin_longitude must both be provided together")
+        if has_city and has_coords:
+            raise ValueError("provide either origin_city or origin lat/lon, not both")
+        if not has_city and not has_coords:
+            raise ValueError("provide either origin_city or both origin_latitude and origin_longitude")
+        return self
+
+    @model_validator(mode="after")
+    def exactly_one_destination_location(self) -> "GroundTransportEstimateInput":
+        has_city = self.destination_city is not None
+        has_coords = self.destination_latitude is not None and self.destination_longitude is not None
+        partial_coords = (self.destination_latitude is None) != (self.destination_longitude is None)
+
+        if partial_coords:
+            raise ValueError(
+                "destination_latitude and destination_longitude must both be provided together"
+            )
+        if has_city and has_coords:
+            raise ValueError("provide either destination_city or destination lat/lon, not both")
+        if not has_city and not has_coords:
+            raise ValueError(
+                "provide either destination_city or both destination_latitude and destination_longitude"
+            )
+        return self
+
+
+class GroundTransportEstimateResult(BaseModel):
+    """Output contract for estimate_ground_transport().
+
+    THIS IS NEVER A BOOKABLE FARE — see GroundTransportEstimateInput's
+    docstring for why no ride-hailing API is integrated. distance_km is
+    straight-line (haversine) distance with a rough road-distance
+    correction factor applied, NOT a real route distance — no routing API
+    is called. estimated_cost_usd_low/high is a budgeting range, not a
+    quote. Always relay `disclaimer` to the traveler alongside the range.
+    """
+
+    origin_resolved_name: str
+    origin_latitude: float
+    origin_longitude: float
+    destination_resolved_name: str
+    destination_latitude: float
+    destination_longitude: float
+    distance_km: float
+    estimated_cost_usd_low: float
+    estimated_cost_usd_high: float
+    disclaimer: str = (
+        "This is a rough, straight-line-distance estimate — NOT a real fare or a "
+        "booking. Actual cost depends on your local ride app, route, traffic, and "
+        "surge pricing. Book your ride separately (e.g. Uber, Ola, Rapido, or a "
+        "local taxi/auto)."
+    )
+    provider: str = "estimate"

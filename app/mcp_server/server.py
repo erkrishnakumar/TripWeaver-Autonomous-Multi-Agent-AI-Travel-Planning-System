@@ -6,14 +6,16 @@ so it can be reached by any MCP client — a CrewAI agent, Claude Desktop, or
 anything else speaking the protocol — without those clients importing
 app.tools directly.
 
-SIX tools are exposed, not five: the four deterministic/LLM tools from the
+EIGHT tools are exposed. Four are deterministic/LLM lookups from the
 Phase 1 roadmap (search_flights, get_weather_forecast, search_hotels,
-check_visa_requirements), plus create_trip and — split into two, see below
-— propose_flight_booking / propose_hotel_booking. create_trip is included
-because an MCP client needs a trip_id before it can call either propose_*
-tool; without it this server can't be used end-to-end for its actual
-purpose. Phase 1's "five tools" framing was about the tool layer, not a cap
-on what Phase 2 exposes.
+check_visa_requirements). create_trip is included because an MCP client
+needs a trip_id before it can call either propose_* tool; without it this
+server can't be used end-to-end for its actual purpose. Phase 1's "five
+tools" framing was about the tool layer, not a cap on what Phase 2
+exposes. propose_booking() is split into propose_flight_booking /
+propose_hotel_booking (see below). estimate_ground_transport is a Phase
+2.1 addition — see its own section below for why it exists and why it's
+architecturally different from every other tool here.
 
 propose_booking() is exposed as TWO separate MCP tools rather than one,
 because its Python signature takes a Union[ProposeFlightBookingInput,
@@ -22,6 +24,21 @@ MCP tool's JSON schema (an LLM client would see one ambiguous "offer_or_
 listing" field instead of two clearly-typed, clearly-named tools). Two
 explicit tools give a calling agent an unambiguous schema and match the
 project's own two separate *BookingInput models in schemas.py.
+
+GROUND TRANSPORT (estimate_ground_transport): TripWeaver does NOT
+integrate a ride-hailing API for home<->airport / airport<->hotel legs.
+Duffel Cars (a real product) was considered and rejected for this — it's
+self-drive car rental (Avis/Hertz/Sixt/etc.), not a chauffeured transfer,
+so using it here would be technically possible but practically wrong.
+Real ride-hailing APIs don't fit either: Ola/Rapido have no public booking
+API, and Uber's requires an enterprise partnership, not a self-serve
+token. So this tool gives a rough, disclaimed cost ESTIMATE instead of a
+real booking — see app/tools/ground_transport.py's module docstring for
+the full rationale. Unlike every other stateful concept in this file, it
+has NO approval-gate counterpart: there is nothing to approve, because
+nothing here is ever bookable. It's also the only tool in this file with
+zero external dependency (no Duffel, no Groq, no new API key) — it only
+calls the geocoding path weather.py/hotels.py already use, plus local math.
 
 ERROR HANDLING CONTRACT — READ BEFORE ADDING A NEW TOOL HERE:
 Every underlying app.tools function returns `Result | ToolError` (a
@@ -58,12 +75,15 @@ from fastmcp.exceptions import ToolError as MCPToolError
 from app.db.session import get_session
 from app.tools.create_trip import create_trip as _create_trip
 from app.tools.flights import search_flights as _search_flights
+from app.tools.ground_transport import estimate_ground_transport as _estimate_ground_transport
 from app.tools.hotels import search_hotels as _search_hotels
 from app.tools.propose_booking import propose_booking as _propose_booking
 from app.tools.schemas import (
     FlightOffer,
     FlightSearchInput,
     FlightSearchResult,
+    GroundTransportEstimateInput,
+    GroundTransportEstimateResult,
     HotelListing,
     HotelSearchInput,
     HotelSearchResult,
@@ -94,7 +114,9 @@ mcp = FastMCP(
         "propose_hotel_booking NEVER book anything for real: they only create a "
         "PENDING_APPROVAL record that a separate, human-triggered step must confirm. "
         "There is no tool here — and there will never be one — that completes a real "
-        "booking."
+        "booking. estimate_ground_transport gives a rough, non-bookable cost estimate "
+        "for legs like home-to-airport or airport-to-hotel — always relay its disclaimer "
+        "field too, and never present the range as a fare quote."
     ),
 )
 
@@ -162,6 +184,23 @@ def check_visa_requirements(query: VisaCheckInput) -> VisaCheckResult:
     an error or a false negative.
     """
     return _unwrap(_check_visa_requirements(query))
+
+
+@mcp.tool
+def estimate_ground_transport(
+    query: GroundTransportEstimateInput,
+) -> GroundTransportEstimateResult:
+    """Get a rough, non-bookable cost estimate for a ground-transport leg
+    (e.g. home -> airport, or airport -> hotel).
+
+    THIS NEVER BOOKS A RIDE, and there is no path here that ever will —
+    TripWeaver doesn't integrate a ride-hailing API (see
+    app/tools/ground_transport.py for why). Always relay the returned
+    `disclaimer` field to the traveler alongside
+    estimated_cost_usd_low/high, and present the range as a rough budgeting
+    figure, never as a fare quote.
+    """
+    return _unwrap(_estimate_ground_transport(query))
 
 
 # ---------------------------------------------------------------------------
