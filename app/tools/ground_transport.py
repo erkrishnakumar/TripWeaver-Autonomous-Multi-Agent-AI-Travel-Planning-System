@@ -109,6 +109,9 @@ def _resolve_location(
 
     # lat/lon were given directly — no display name to resolve, use the
     # coordinates themselves, same convention as weather.py/hotels.py.
+    # Guaranteed non-None here by GroundTransportEstimateInput's model
+    # validators (exactly_one_origin/destination_location).
+    assert latitude is not None and longitude is not None
     return latitude, longitude, f"{latitude:.4f}, {longitude:.4f}"
 
 

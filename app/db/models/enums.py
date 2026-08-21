@@ -7,7 +7,7 @@ from __future__ import annotations
 import enum
 
 
-class TripStatus(str, enum.Enum):
+class TripStatus(enum.StrEnum):
     DRAFT = "draft"
     RESEARCHING = "researching"
     PLANNING = "planning"
@@ -18,12 +18,12 @@ class TripStatus(str, enum.Enum):
     FAILED = "failed"
 
 
-class BookingType(str, enum.Enum):
+class BookingType(enum.StrEnum):
     FLIGHT = "flight"
     HOTEL = "hotel"
 
 
-class BookingStatus(str, enum.Enum):
+class BookingStatus(enum.StrEnum):
     PENDING_APPROVAL = "pending_approval"
     APPROVED = "approved"
     REJECTED = "rejected"
@@ -32,7 +32,7 @@ class BookingStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
-class ApprovalDecision(str, enum.Enum):
+class ApprovalDecision(enum.StrEnum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"

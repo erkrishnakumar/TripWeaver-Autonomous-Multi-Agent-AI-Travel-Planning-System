@@ -69,9 +69,7 @@ class Trip(Base, TimestampMixin):
         Enum(
             TripStatus,
             name="trip_status",
-            values_callable=lambda enum_cls: [
-                item.value for item in enum_cls
-            ],
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
         ),
         default=TripStatus.DRAFT,
         nullable=False,
@@ -82,22 +80,22 @@ class Trip(Base, TimestampMixin):
         nullable=True,
     )
 
-    itineraries: Mapped[list["Itinerary"]] = relationship(
+    itineraries: Mapped[list[Itinerary]] = relationship(
         back_populates="trip",
         cascade="all, delete-orphan",
     )
 
-    flight_options: Mapped[list["FlightOption"]] = relationship(
+    flight_options: Mapped[list[FlightOption]] = relationship(
         back_populates="trip",
         cascade="all, delete-orphan",
     )
 
-    hotel_options: Mapped[list["HotelOption"]] = relationship(
+    hotel_options: Mapped[list[HotelOption]] = relationship(
         back_populates="trip",
         cascade="all, delete-orphan",
     )
 
-    bookings: Mapped[list["Booking"]] = relationship(
+    bookings: Mapped[list[Booking]] = relationship(
         back_populates="trip",
         cascade="all, delete-orphan",
     )

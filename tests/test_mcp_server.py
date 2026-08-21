@@ -38,12 +38,12 @@ from datetime import date, timedelta
 
 import pytest
 import pytest_asyncio
-from app.db.base import Base
 from fastmcp import Client
 from fastmcp.exceptions import ToolError as MCPToolError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.mcp_server.server as server_module
+from app.db.base import Base
 from app.tools.schemas import (
     CabinClass,
     DailyForecast,
@@ -497,9 +497,7 @@ class TestEstimateGroundTransportTool:
             estimated_cost_usd_low=8.0,
             estimated_cost_usd_high=14.0,
         )
-        monkeypatch.setattr(
-            server_module, "_estimate_ground_transport", lambda query: fake_result
-        )
+        monkeypatch.setattr(server_module, "_estimate_ground_transport", lambda query: fake_result)
 
         async with Client(server_module.mcp) as client:
             result = await client.call_tool(

@@ -10,8 +10,8 @@ test runs.
 from __future__ import annotations
 
 import pytest
-from app.tools.geocoding import _GEOCODING_URL
 
+from app.tools.geocoding import _GEOCODING_URL
 from app.tools.ground_transport import _haversine_km, estimate_ground_transport
 from app.tools.schemas import GroundTransportEstimateInput, ToolError
 

@@ -10,7 +10,6 @@ same reason there's no live-httpx-call test elsewhere: mocking the client
 boundary is the correct level to test at.
 """
 
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -87,7 +86,8 @@ def test_null_visa_required_is_preserved_for_ambiguous_cases(query):
     with patch("app.tools.visa.Groq") as MockGroq:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = _mock_groq_response(
-            '{"visa_required": null, "summary": "Depends on length of stay and current agreements."}'
+            '{"visa_required": null, '
+            '"summary": "Depends on length of stay and current agreements."}'
         )
         MockGroq.return_value = mock_client
 

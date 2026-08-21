@@ -80,11 +80,11 @@ class HotelOption(Base, TimestampMixin):
         default=False,
     )
 
-    trip: Mapped["Trip"] = relationship(
+    trip: Mapped[Trip] = relationship(
         back_populates="hotel_options",
     )
 
-    bookings: Mapped[list["Booking"]] = relationship(
+    bookings: Mapped[list[Booking]] = relationship(
         back_populates="hotel_option",
     )
 

@@ -22,6 +22,7 @@ reliability upside to mocking it, only fixture upkeep for no benefit.
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Any, cast
 
 import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -82,21 +83,21 @@ def _is_retryable_open_meteo_error(exc: BaseException) -> bool:
     retry=retry_if_exception(_is_retryable_open_meteo_error),
     reraise=True,
 )
-def _get(url: str, params: dict) -> dict:
+def _get(url: str, params: dict[str, Any]) -> dict[str, Any]:
     with httpx.Client(timeout=15.0) as client:
         resp = client.get(url, params=params)
     if resp.status_code >= 400:
         retryable = resp.status_code in _RETRYABLE_STATUS_CODES
         message = f"Open-Meteo API returned {resp.status_code}: {resp.text[:300]}"
         raise OpenMeteoAPIError(resp.status_code, message, retryable)
-    return resp.json()
+    return cast(dict[str, Any], resp.json())
 
 
 def _weather_description(code: int) -> str:
     return _WEATHER_CODE_DESCRIPTIONS.get(code, f"Unknown conditions (code {code})")
 
 
-def _parse_daily_forecast(raw_daily: dict) -> list[DailyForecast]:
+def _parse_daily_forecast(raw_daily: dict[str, Any]) -> list[DailyForecast]:
     days: list[DailyForecast] = []
     dates = raw_daily.get("time", [])
     for i, day_str in enumerate(dates):
@@ -151,6 +152,8 @@ def get_weather_forecast(query: WeatherSearchInput) -> WeatherForecastResult | T
                 )
             latitude, longitude, resolved_name = geocoded
         else:
+            # Guaranteed non-None here by WeatherSearchInput.exactly_one_location.
+            assert query.latitude is not None and query.longitude is not None
             latitude, longitude = query.latitude, query.longitude
             resolved_name = f"{latitude:.4f}, {longitude:.4f}"
 
@@ -159,7 +162,8 @@ def get_weather_forecast(query: WeatherSearchInput) -> WeatherForecastResult | T
             {
                 "latitude": latitude,
                 "longitude": longitude,
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code",
+                "daily": "temperature_2m_max,temperature_2m_min,"
+                "precipitation_probability_max,weather_code",
                 "timezone": "auto",
                 "start_date": str(query.start_date),
                 "end_date": str(query.end_date),
@@ -208,7 +212,10 @@ if __name__ == "__main__":
     if isinstance(result, ToolError):
         print(f"[ERROR] {result.error_type}: {result.message}")
     else:
-        print(f"Forecast for {result.resolved_location_name} ({result.latitude:.2f}, {result.longitude:.2f}):")
+        print(
+            f"Forecast for {result.resolved_location_name}"
+            f"({result.latitude:.2f}, {result.longitude:.2f}):"
+        )
         for day in result.daily:
             print(
                 f"  {day.date}: {day.temp_min_c}–{day.temp_max_c}°C, "

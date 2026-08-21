@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -57,11 +58,20 @@ def _make_idempotency_key(trip_id: str, provider_offer_id: str, booking_type: Bo
 
 
 async def _find_existing_booking(session: AsyncSession, idempotency_key: str) -> Booking | None:
-    result = await session.execute(select(Booking).where(Booking.idempotency_key == idempotency_key))
+    result = await session.execute(
+        select(Booking).where(Booking.idempotency_key == idempotency_key)
+    )
     return result.scalar_one_or_none()
 
 
-async def _write_audit_log(session: AsyncSession, *, trip_id: uuid.UUID, booking_id: uuid.UUID, event_type: str, payload: dict) -> None:
+async def _write_audit_log(
+    session: AsyncSession,
+    *,
+    trip_id: uuid.UUID,
+    booking_id: uuid.UUID,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
     from app.db.models import AuditLog
 
     session.add(
@@ -123,6 +133,7 @@ async def propose_booking(
             was_existing=True,
         )
 
+    option: FlightOption | HotelOption
     try:
         if isinstance(query, ProposeFlightBookingInput):
             option = FlightOption(

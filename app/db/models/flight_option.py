@@ -7,7 +7,7 @@ Represents a candidate flight discovered by the Researcher agent.
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Float, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -60,7 +60,7 @@ class FlightOption(Base, TimestampMixin):
         default=0,
     )
 
-    segments: Mapped[list] = mapped_column(
+    segments: Mapped[list[dict[str, Any]]] = mapped_column(
         variant_json,
         nullable=False,
         default=list,
@@ -76,11 +76,11 @@ class FlightOption(Base, TimestampMixin):
         default=False,
     )
 
-    trip: Mapped["Trip"] = relationship(
+    trip: Mapped[Trip] = relationship(
         back_populates="flight_options",
     )
 
-    bookings: Mapped[list["Booking"]] = relationship(
+    bookings: Mapped[list[Booking]] = relationship(
         back_populates="flight_option",
     )
 

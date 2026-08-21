@@ -195,7 +195,10 @@ def test_cabin_class_defaults_to_economy_when_passengers_missing(httpx_mock):
                         {
                             "segments": [
                                 {
-                                    "marketing_carrier": {"iata_code": "ZZ", "name": "Duffel Airways"},
+                                    "marketing_carrier": {
+                                        "iata_code": "ZZ",
+                                        "name": "Duffel Airways",
+                                    },
                                     "marketing_carrier_flight_number": "999",
                                     "origin": {"iata_code": "JFK"},
                                     "destination": {"iata_code": "ATL"},

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Date, ForeignKey, Index, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -26,8 +26,8 @@ class Itinerary(Base, TimestampMixin):
     )
     day_number: Mapped[int] = mapped_column(nullable=False)
     day_date: Mapped[date] = mapped_column(Date, nullable=False)
-    plan: Mapped[dict] = mapped_column(variant_json, nullable=False, default=dict)
+    plan: Mapped[dict[str, Any]] = mapped_column(variant_json, nullable=False, default=dict)
 
-    trip: Mapped["Trip"] = relationship(back_populates="itineraries")
+    trip: Mapped[Trip] = relationship(back_populates="itineraries")
 
     __table_args__ = (Index("ix_itineraries_trip_day", "trip_id", "day_number", unique=True),)

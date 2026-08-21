@@ -10,9 +10,10 @@ never be updated after creation.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, UTC
+from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -43,13 +44,10 @@ class AuditLog(Base):
     event_type: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
-        doc=(
-            "Examples: trip.created, booking.approved, "
-            "booking.booked"
-        ),
+        doc=("Examples: trip.created, booking.approved, booking.booked"),
     )
 
-    payload: Mapped[dict] = mapped_column(
+    payload: Mapped[dict[str, Any]] = mapped_column(
         variant_json,
         nullable=False,
         default=dict,

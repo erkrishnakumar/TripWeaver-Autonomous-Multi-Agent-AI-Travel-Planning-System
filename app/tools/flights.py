@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 from tenacity import (
@@ -27,6 +28,7 @@ from tenacity import (
 
 from app.config import settings
 from app.tools.schemas import (
+    CabinClass,
     FlightOffer,
     FlightSearchInput,
     FlightSearchResult,
@@ -55,11 +57,21 @@ def _headers() -> dict[str, str]:
     }
 
 
-def _build_offer_request_payload(query: FlightSearchInput) -> dict:
-    slices = [{"origin": query.origin, "destination": query.destination, "departure_date": str(query.depart_date)}]
+def _build_offer_request_payload(query: FlightSearchInput) -> dict[str, Any]:
+    slices = [
+        {
+            "origin": query.origin,
+            "destination": query.destination,
+            "departure_date": str(query.depart_date),
+        }
+    ]
     if query.return_date:
         slices.append(
-            {"origin": query.destination, "destination": query.origin, "departure_date": str(query.return_date)}
+            {
+                "origin": query.destination,
+                "destination": query.origin,
+                "departure_date": str(query.return_date),
+            }
         )
     return {
         "data": {
@@ -70,7 +82,7 @@ def _build_offer_request_payload(query: FlightSearchInput) -> dict:
     }
 
 
-def _extract_cabin_class(raw: dict) -> str:
+def _extract_cabin_class(raw: dict[str, Any]) -> CabinClass:
     """Cabin class lives per-passenger, per-segment in Duffel's real Offer
     schema (slices[].segments[].passengers[].cabin_class) — verified
     against Duffel's own Offers schema docs. There is no top-level
@@ -84,17 +96,17 @@ def _extract_cabin_class(raw: dict) -> str:
     whole search)."""
     slices = raw.get("slices", [])
     if not slices:
-        return "economy"
+        return CabinClass.ECONOMY
     segments = slices[0].get("segments", [])
     if not segments:
-        return "economy"
+        return CabinClass.ECONOMY
     passengers = segments[0].get("passengers", [])
     if not passengers:
-        return "economy"
-    return passengers[0].get("cabin_class", "economy")
+        return CabinClass.ECONOMY
+    return CabinClass(passengers[0].get("cabin_class", "economy"))
 
 
-def _parse_offer(raw: dict) -> FlightOffer:
+def _parse_offer(raw: dict[str, Any]) -> FlightOffer:
     segments: list[FlightSegment] = []
     stops_outbound = 0
     for i, sl in enumerate(raw.get("slices", [])):
@@ -136,7 +148,7 @@ def _is_retryable_duffel_error(exc: BaseException) -> bool:
     retry=retry_if_exception(_is_retryable_duffel_error),
     reraise=True,
 )
-def _post_offer_request(payload: dict) -> dict:
+def _post_offer_request(payload: dict[str, Any]) -> dict[str, Any]:
     with httpx.Client(timeout=15.0) as client:
         resp = client.post(
             f"{settings.duffel_base_url}/air/offer_requests",
@@ -148,14 +160,14 @@ def _post_offer_request(payload: dict) -> dict:
         retryable = resp.status_code in _RETRYABLE_STATUS_CODES
         message = f"Duffel API returned {resp.status_code}: {resp.text[:300]}"
         raise DuffelAPIError(resp.status_code, message, retryable)
-    return resp.json()
+    return cast(dict[str, Any], resp.json())
 
 
-def _load_mock_offers(query: FlightSearchInput) -> list[dict]:
+def _load_mock_offers(query: FlightSearchInput) -> list[dict[str, Any]]:
     with open(_FIXTURES_PATH) as f:
         fixtures = json.load(f)
     key = f"{query.origin}-{query.destination}"
-    return fixtures.get(key, fixtures["DEFAULT"])
+    return cast(list[dict[str, Any]], fixtures.get(key, fixtures["DEFAULT"]))
 
 
 def search_flights(query: FlightSearchInput) -> FlightSearchResult | ToolError:
@@ -233,4 +245,6 @@ if __name__ == "__main__":
     else:
         print(f"Found {len(result.offers)} offers (mock={result.is_mock}):")
         for offer in result.offers[:5]:
-            print(f"  {offer.offer_id}: ${offer.total_price_usd} — {len(offer.segments)} segment(s)")
+            print(
+                f"  {offer.offer_id}: ${offer.total_price_usd} — {len(offer.segments)} segment(s)"
+            )

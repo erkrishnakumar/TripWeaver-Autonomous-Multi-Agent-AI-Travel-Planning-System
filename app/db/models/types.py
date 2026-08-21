@@ -12,6 +12,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 variant_json = JSON().with_variant(JSONB, "postgresql")
 
+
 # sqlalchemy.Uuid (not dialects.postgresql.UUID) correctly handles both:
 # native UUID storage on Postgres, and a string-based fallback on SQLite/
 # other dialects — with the Python-side UUID<->str conversion built in for

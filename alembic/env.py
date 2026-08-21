@@ -4,8 +4,9 @@ import os
 import sys
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import create_engine, pool
+
+from alembic import context
 
 # Make app/ importable when Alembic is run from the project root.
 sys.path.insert(0, os.getcwd())
@@ -13,7 +14,6 @@ sys.path.insert(0, os.getcwd())
 from app.config import settings  # noqa: E402
 from app.db import models  # noqa: E402,F401
 from app.db.base import Base  # noqa: E402
-
 
 # Alembic Config object.
 config = context.config

@@ -68,9 +68,11 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from typing import TypeVar
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError as MCPToolError
+from pydantic import BaseModel
 
 from app.db.session import get_session
 from app.tools.create_trip import create_trip as _create_trip
@@ -121,7 +123,10 @@ mcp = FastMCP(
 )
 
 
-def _unwrap(result):
+_ResultT = TypeVar("_ResultT", bound=BaseModel)
+
+
+def _unwrap(result: _ResultT | DomainToolError) -> _ResultT:
     """Translate a domain ToolError (a Pydantic model, returned by value)
     into FastMCP's ToolError (an exception, raised), so a tool failure is
     surfaced to the calling agent/LLM as an actual failed tool call instead
@@ -274,7 +279,7 @@ async def propose_flight_booking(trip_id: str, offer: FlightOffer) -> ProposeBoo
         result = await _propose_booking(session, query)
         if isinstance(result, DomainToolError):
             await session.rollback()
-            return _unwrap(result)
+            raise MCPToolError(f"[{result.error_type}] {result.message}")
         try:
             await session.commit()
         except Exception:
@@ -308,7 +313,7 @@ async def propose_hotel_booking(
         result = await _propose_booking(session, query)
         if isinstance(result, DomainToolError):
             await session.rollback()
-            return _unwrap(result)
+            raise MCPToolError(f"[{result.error_type}] {result.message}")
         try:
             await session.commit()
         except Exception:

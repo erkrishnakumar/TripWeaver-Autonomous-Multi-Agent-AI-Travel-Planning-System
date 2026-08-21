@@ -51,9 +51,7 @@ class Booking(Base, TimestampMixin):
         Enum(
             BookingType,
             name="booking_type",
-            values_callable=lambda enum_cls: [
-                item.value for item in enum_cls
-            ],
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
         ),
         nullable=False,
     )
@@ -78,9 +76,7 @@ class Booking(Base, TimestampMixin):
         Enum(
             BookingStatus,
             name="booking_status",
-            values_callable=lambda enum_cls: [
-                item.value for item in enum_cls
-            ],
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
         ),
         default=BookingStatus.PENDING_APPROVAL,
         nullable=False,
@@ -108,19 +104,19 @@ class Booking(Base, TimestampMixin):
         nullable=True,
     )
 
-    trip: Mapped["Trip"] = relationship(
+    trip: Mapped[Trip] = relationship(
         back_populates="bookings",
     )
 
-    flight_option: Mapped["FlightOption | None"] = relationship(
+    flight_option: Mapped[FlightOption | None] = relationship(
         back_populates="bookings",
     )
 
-    hotel_option: Mapped["HotelOption | None"] = relationship(
+    hotel_option: Mapped[HotelOption | None] = relationship(
         back_populates="bookings",
     )
 
-    approval: Mapped["Approval | None"] = relationship(
+    approval: Mapped[Approval | None] = relationship(
         back_populates="booking",
         uselist=False,
         cascade="all, delete-orphan",

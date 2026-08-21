@@ -9,12 +9,12 @@ here first — everything downstream depends on these.
 from __future__ import annotations
 
 from datetime import date, datetime
-from enum import Enum
+from enum import StrEnum
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 
-class CabinClass(str, Enum):
+class CabinClass(StrEnum):
     ECONOMY = "economy"
     PREMIUM_ECONOMY = "premium_economy"
     BUSINESS = "business"
@@ -39,7 +39,7 @@ class FlightSearchInput(BaseModel):
 
     @field_validator("return_date")
     @classmethod
-    def return_after_depart(cls, v: date | None, info) -> date | None:
+    def return_after_depart(cls, v: date | None, info: ValidationInfo) -> date | None:
         depart = info.data.get("depart_date")
         if v is not None and depart is not None and v < depart:
             raise ValueError("return_date cannot be before depart_date")
@@ -97,14 +97,14 @@ class WeatherSearchInput(BaseModel):
 
     @field_validator("end_date")
     @classmethod
-    def end_after_start(cls, v: date, info) -> date:
+    def end_after_start(cls, v: date, info: ValidationInfo) -> date:
         start = info.data.get("start_date")
         if start is not None and v < start:
             raise ValueError("end_date cannot be before start_date")
         return v
 
     @model_validator(mode="after")
-    def exactly_one_location(self) -> "WeatherSearchInput":
+    def exactly_one_location(self) -> WeatherSearchInput:
         has_city = self.city is not None
         has_coords = self.latitude is not None and self.longitude is not None
         partial_coords = (self.latitude is None) != (self.longitude is None)
@@ -175,14 +175,14 @@ class HotelSearchInput(BaseModel):
 
     @field_validator("check_out")
     @classmethod
-    def check_out_after_check_in(cls, v: date, info) -> date:
+    def check_out_after_check_in(cls, v: date, info: ValidationInfo) -> date:
         check_in = info.data.get("check_in")
         if check_in is not None and v <= check_in:
             raise ValueError("check_out must be after check_in")
         return v
 
     @model_validator(mode="after")
-    def exactly_one_location(self) -> "HotelSearchInput":
+    def exactly_one_location(self) -> HotelSearchInput:
         has_city = self.city is not None
         has_coords = self.latitude is not None and self.longitude is not None
         partial_coords = (self.latitude is None) != (self.longitude is None)
@@ -246,7 +246,7 @@ class ToolError(BaseModel):
     retryable: bool = False
 
 
-class TravelPurpose(str, Enum):
+class TravelPurpose(StrEnum):
     TOURISM = "tourism"
     BUSINESS = "business"
     TRANSIT = "transit"
@@ -406,7 +406,7 @@ class GroundTransportEstimateInput(BaseModel):
     destination_longitude: float | None = Field(default=None, ge=-180, le=180)
 
     @model_validator(mode="after")
-    def exactly_one_origin_location(self) -> "GroundTransportEstimateInput":
+    def exactly_one_origin_location(self) -> GroundTransportEstimateInput:
         has_city = self.origin_city is not None
         has_coords = self.origin_latitude is not None and self.origin_longitude is not None
         partial_coords = (self.origin_latitude is None) != (self.origin_longitude is None)
@@ -416,13 +416,17 @@ class GroundTransportEstimateInput(BaseModel):
         if has_city and has_coords:
             raise ValueError("provide either origin_city or origin lat/lon, not both")
         if not has_city and not has_coords:
-            raise ValueError("provide either origin_city or both origin_latitude and origin_longitude")
+            raise ValueError(
+                "provide either origin_city or both origin_latitude and origin_longitude"
+            )
         return self
 
     @model_validator(mode="after")
-    def exactly_one_destination_location(self) -> "GroundTransportEstimateInput":
+    def exactly_one_destination_location(self) -> GroundTransportEstimateInput:
         has_city = self.destination_city is not None
-        has_coords = self.destination_latitude is not None and self.destination_longitude is not None
+        has_coords = (
+            self.destination_latitude is not None and self.destination_longitude is not None
+        )
         partial_coords = (self.destination_latitude is None) != (self.destination_longitude is None)
 
         if partial_coords:
@@ -433,7 +437,8 @@ class GroundTransportEstimateInput(BaseModel):
             raise ValueError("provide either destination_city or destination lat/lon, not both")
         if not has_city and not has_coords:
             raise ValueError(
-                "provide either destination_city or both destination_latitude and destination_longitude"
+                "provide either destination_city or both"
+                "destination_latitude and destination_longitude"
             )
         return self
 

@@ -46,9 +46,7 @@ class Approval(Base, TimestampMixin):
         Enum(
             ApprovalDecision,
             name="approval_decision",
-            values_callable=lambda enum_cls: [
-                item.value for item in enum_cls
-            ],
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
         ),
         default=ApprovalDecision.PENDING,
         nullable=False,
@@ -70,7 +68,7 @@ class Approval(Base, TimestampMixin):
         nullable=True,
     )
 
-    booking: Mapped["Booking"] = relationship(
+    booking: Mapped[Booking] = relationship(
         back_populates="approval",
     )
 
