@@ -34,7 +34,7 @@ ever violated in server.py.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -46,7 +46,12 @@ import app.mcp_server.server as server_module
 from app.db.base import Base
 from app.tools.schemas import (
     CabinClass,
+    CarQuoteResult,
+    CarRateOption,
+    CarRentalPaymentType,
+    CarRentalSearchResult,
     DailyForecast,
+    DriverDetails,
     FlightOffer,
     FlightSearchResult,
     FlightSegment,
@@ -118,6 +123,42 @@ def hotel_listing() -> HotelListing:
         longitude=100.5,
         estimated_price_total_usd=600.0,
         nights=3,
+    )
+
+
+@pytest.fixture
+def car_rate() -> CarRateOption:
+    return CarRateOption(
+        rate_id="rat_test_001",
+        car_description="Compact - Toyota Corolla or similar",
+        supplier_name="Hertz",
+        payment_type=CarRentalPaymentType.PREPAID,
+        estimated_price_total_usd=145.0,
+        pickup_location_name="Atlanta",
+        dropoff_location_name="Atlanta",
+        pickup_at=datetime(2026, 9, 14, 10, 0),
+        dropoff_at=datetime(2026, 9, 17, 10, 0),
+    )
+
+
+@pytest.fixture
+def car_quote() -> CarQuoteResult:
+    return CarQuoteResult(
+        quote_id="qut_test_001",
+        rate_id="rat_test_001",
+        total_price_usd=145.0,
+        payment_type=CarRentalPaymentType.PREPAID,
+    )
+
+
+@pytest.fixture
+def driver_details() -> DriverDetails:
+    return DriverDetails(
+        given_name="Krishna",
+        family_name="Kumar",
+        date_of_birth=date(1995, 1, 1),
+        email="krishna@example.com",
+        phone_number="+15555555555",
     )
 
 
@@ -529,12 +570,159 @@ class TestEstimateGroundTransportTool:
 
 
 # ---------------------------------------------------------------------------
+# search_car_rentals / get_car_rental_quote
+# ---------------------------------------------------------------------------
+
+
+class TestSearchCarRentalsTool:
+    async def test_success_returns_rates(self, monkeypatch, car_rate):
+        fake_result = CarRentalSearchResult(
+            query={
+                "pickup_city": "Atlanta",
+                "pickup_at": "2026-09-14T10:00:00",
+                "dropoff_at": "2026-09-17T10:00:00",
+                "driver_age": 30,
+                "driver_country_code": "US",
+            },
+            resolved_pickup_location_name="Atlanta",
+            resolved_dropoff_location_name="Atlanta",
+            rates=[car_rate],
+        )
+        monkeypatch.setattr(server_module, "_search_car_rentals", lambda query: fake_result)
+
+        async with Client(server_module.mcp) as client:
+            result = await client.call_tool(
+                "search_car_rentals",
+                {
+                    "query": {
+                        "pickup_city": "Atlanta",
+                        "pickup_at": "2026-09-14T10:00:00",
+                        "dropoff_at": "2026-09-17T10:00:00",
+                        "driver_age": 30,
+                        "driver_country_code": "US",
+                    }
+                },
+            )
+
+        assert result.data.rates[0].rate_id == "rat_test_001"
+
+    async def test_location_not_found_is_raised_with_real_message(self, monkeypatch):
+        monkeypatch.setattr(
+            server_module,
+            "_search_car_rentals",
+            lambda query: DomainToolError(
+                tool_name="search_car_rentals",
+                error_type="location_not_found",
+                message="Couldn't find a pickup location matching 'Nowhereville'.",
+                retryable=False,
+            ),
+        )
+
+        async with Client(server_module.mcp) as client:
+            with pytest.raises(MCPToolError, match="location_not_found"):
+                await client.call_tool(
+                    "search_car_rentals",
+                    {
+                        "query": {
+                            "pickup_city": "Nowhereville",
+                            "pickup_at": "2026-09-14T10:00:00",
+                            "dropoff_at": "2026-09-17T10:00:00",
+                            "driver_age": 30,
+                            "driver_country_code": "US",
+                        }
+                    },
+                )
+
+
+class TestGetCarRentalQuoteTool:
+    async def test_success_returns_firm_quote(self, monkeypatch, car_quote):
+        monkeypatch.setattr(server_module, "_get_car_rental_quote", lambda query: car_quote)
+
+        async with Client(server_module.mcp) as client:
+            result = await client.call_tool(
+                "get_car_rental_quote", {"query": {"rate_id": "rat_test_001"}}
+            )
+
+        assert result.data.quote_id == "qut_test_001"
+        assert result.data.total_price_usd == 145.0
+
+    async def test_rate_not_found_is_raised_with_real_message(self, monkeypatch):
+        monkeypatch.setattr(
+            server_module,
+            "_get_car_rental_quote",
+            lambda query: DomainToolError(
+                tool_name="get_car_rental_quote",
+                error_type="rate_not_found",
+                message="No mock rate found with id 'bogus'.",
+                retryable=False,
+            ),
+        )
+
+        async with Client(server_module.mcp) as client:
+            with pytest.raises(MCPToolError, match="rate_not_found"):
+                await client.call_tool("get_car_rental_quote", {"query": {"rate_id": "bogus"}})
+
+
+class TestProposeCarBookingTool:
+    async def test_creates_pending_car_booking(
+        self, sqlite_session_override, car_rate, car_quote, driver_details
+    ):
+        async with Client(server_module.mcp) as client:
+            trip = await _mcp_create_trip(client)
+            result = await client.call_tool(
+                "propose_car_booking",
+                {
+                    "trip_id": trip.id,
+                    "rate": car_rate.model_dump(mode="json"),
+                    "quote": car_quote.model_dump(mode="json"),
+                    "driver": driver_details.model_dump(mode="json"),
+                },
+            )
+
+        assert result.data.status == "pending_approval"
+        assert result.data.was_existing is False
+
+    async def test_calling_twice_returns_was_existing_true(
+        self, sqlite_session_override, car_rate, car_quote, driver_details
+    ):
+        async with Client(server_module.mcp) as client:
+            trip = await _mcp_create_trip(client)
+            args = {
+                "trip_id": trip.id,
+                "rate": car_rate.model_dump(mode="json"),
+                "quote": car_quote.model_dump(mode="json"),
+                "driver": driver_details.model_dump(mode="json"),
+            }
+            first = await client.call_tool("propose_car_booking", args)
+            second = await client.call_tool("propose_car_booking", args)
+
+        assert first.data.was_existing is False
+        assert second.data.was_existing is True
+        assert second.data.booking_id == first.data.booking_id
+
+    async def test_invalid_trip_id_raised_as_mcp_error(
+        self, sqlite_session_override, car_rate, car_quote, driver_details
+    ):
+        async with Client(server_module.mcp) as client:
+            with pytest.raises(MCPToolError, match="invalid_trip_id"):
+                await client.call_tool(
+                    "propose_car_booking",
+                    {
+                        "trip_id": "not-a-valid-uuid",
+                        "rate": car_rate.model_dump(mode="json"),
+                        "quote": car_quote.model_dump(mode="json"),
+                        "driver": driver_details.model_dump(mode="json"),
+                    },
+                )
+
+
+# ---------------------------------------------------------------------------
 # Server-wide sanity
 # ---------------------------------------------------------------------------
 
 
 class TestServerRegistration:
-    async def test_all_eight_tools_are_registered(self):
+    async def test_all_eleven_tools_are_registered(self):
         async with Client(server_module.mcp) as client:
             tools = await client.list_tools()
 
@@ -545,7 +733,10 @@ class TestServerRegistration:
             "search_hotels",
             "check_visa_requirements",
             "estimate_ground_transport",
+            "search_car_rentals",
+            "get_car_rental_quote",
             "create_trip",
             "propose_flight_booking",
             "propose_hotel_booking",
+            "propose_car_booking",
         }

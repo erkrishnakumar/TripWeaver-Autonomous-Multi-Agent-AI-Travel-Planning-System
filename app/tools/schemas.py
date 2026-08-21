@@ -470,3 +470,194 @@ class GroundTransportEstimateResult(BaseModel):
         "local taxi/auto)."
     )
     provider: str = "estimate"
+
+
+class CarRentalPaymentType(StrEnum):
+    """Duffel Cars' three payment models — surfaced verbatim to the human
+    approver, since it changes what "approving this" actually commits to
+    (money charged now vs. a card held vs. nothing at all until the counter)."""
+
+    PREPAID = "prepaid"
+    GUARANTEE = "guarantee"
+    POSTPAID = "postpaid"
+
+
+class DriverDetails(BaseModel):
+    """Driver PII required by Duffel's real Cars booking contract
+    (POST /cars/bookings). This is more sensitive than anything else
+    TripWeaver currently stores (date of birth, phone number) — handle
+    accordingly; see the Cars rollout notes in docs/TripWeaver_Roadmap.md
+    for the standing auth/closed-user-group requirement this reinforces."""
+
+    given_name: str = Field(..., min_length=1)
+    family_name: str = Field(..., min_length=1)
+    date_of_birth: date
+    email: str = Field(..., min_length=3)
+    phone_number: str = Field(..., min_length=3)
+
+
+class CarRentalSearchInput(BaseModel):
+    """Input contract for search_car_rentals().
+
+    Pickup is EITHER a city name OR explicit lat/lon, same convention as
+    every other search-by-place input in this file. Dropoff is optional —
+    if omitted entirely, it defaults to the pickup location (a same-location
+    rental), matching the common case; if partially given, that's an error,
+    same "all or nothing" rule as every other location pair here.
+
+    driver_age and driver_country_code are required by Duffel's real
+    /cars/searches contract, not optional extras — some suppliers restrict
+    or surcharge based on driver age, and eligibility can depend on country
+    of residence, so omitting these would silently misprice or hide results.
+    """
+
+    pickup_city: str | None = Field(default=None, min_length=1)
+    pickup_latitude: float | None = Field(default=None, ge=-90, le=90)
+    pickup_longitude: float | None = Field(default=None, ge=-180, le=180)
+
+    dropoff_city: str | None = Field(default=None, min_length=1)
+    dropoff_latitude: float | None = Field(default=None, ge=-90, le=90)
+    dropoff_longitude: float | None = Field(default=None, ge=-180, le=180)
+
+    pickup_at: datetime
+    dropoff_at: datetime
+    radius_km: int = Field(
+        default=5,
+        ge=1,
+        le=10,
+        description="Search radius around pickup/dropoff, in km. Duffel's real "
+        "POST /cars/search caps this at 10 — verified via a live 422 "
+        "('radius must be less than or equal to 10'), unlike Stays' radius "
+        "(HotelSearchInput), which allows up to 100.",
+    )
+
+    driver_age: int = Field(ge=18, le=99)
+    driver_country_code: str = Field(..., min_length=2, max_length=2)
+
+    @field_validator("dropoff_at")
+    @classmethod
+    def dropoff_after_pickup(cls, v: datetime, info: ValidationInfo) -> datetime:
+        pickup_at = info.data.get("pickup_at")
+        if pickup_at is not None and v <= pickup_at:
+            raise ValueError("dropoff_at must be after pickup_at")
+        return v
+
+    @model_validator(mode="after")
+    def exactly_one_pickup_location(self) -> CarRentalSearchInput:
+        has_city = self.pickup_city is not None
+        has_coords = self.pickup_latitude is not None and self.pickup_longitude is not None
+        partial_coords = (self.pickup_latitude is None) != (self.pickup_longitude is None)
+
+        if partial_coords:
+            raise ValueError("pickup_latitude and pickup_longitude must both be provided together")
+        if has_city and has_coords:
+            raise ValueError("provide either pickup_city or pickup lat/lon, not both")
+        if not has_city and not has_coords:
+            raise ValueError(
+                "provide either pickup_city or both pickup_latitude and pickup_longitude"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def dropoff_all_or_nothing(self) -> CarRentalSearchInput:
+        has_city = self.dropoff_city is not None
+        has_coords = self.dropoff_latitude is not None and self.dropoff_longitude is not None
+        partial_coords = (self.dropoff_latitude is None) != (self.dropoff_longitude is None)
+
+        if partial_coords:
+            raise ValueError(
+                "dropoff_latitude and dropoff_longitude must both be provided together"
+            )
+        if has_city and has_coords:
+            raise ValueError("provide either dropoff_city or dropoff lat/lon, not both")
+        # Omitting dropoff entirely is valid — it defaults to the pickup
+        # location in search_car_rentals(), a same-location rental.
+        return self
+
+
+class CarRateOption(BaseModel):
+    """One rate returned by a Cars search — an ESTIMATE, not a firm bookable
+    price. Duffel's own docs warn the final price on a quote can differ from
+    the rate price, so re-fetch a quote (get_car_rental_quote()) before
+    presenting a firm number for approval — same "estimate vs. firm" caveat
+    HotelListing already carries for Stays."""
+
+    rate_id: str
+    car_description: str = Field(description='e.g. "Compact - Toyota Corolla or similar"')
+    supplier_name: str
+    payment_type: CarRentalPaymentType
+    estimated_price_total_usd: float
+    price_currency_original: str = "USD"
+    pickup_location_name: str
+    dropoff_location_name: str
+    pickup_at: datetime
+    dropoff_at: datetime
+
+
+class CarRentalSearchResult(BaseModel):
+    """Output contract for search_car_rentals()."""
+
+    query: CarRentalSearchInput
+    resolved_pickup_location_name: str
+    resolved_dropoff_location_name: str
+    rates: list[CarRateOption]
+    provider: str = "duffel"
+    is_sandbox: bool = True
+    is_mock: bool = False
+
+
+class CarQuoteInput(BaseModel):
+    """Input contract for get_car_rental_quote() — the "Quote" step of
+    Duffel's Search -> Quote -> Booking Cars flow."""
+
+    rate_id: str = Field(
+        description="A rate_id from a CarRateOption returned by search_car_rentals()"
+    )
+
+
+class CarQuoteResult(BaseModel):
+    """Output contract for get_car_rental_quote().
+
+    This IS the firm, bookable price — unlike CarRateOption's estimate.
+    Duffel's docs explicitly say to display this price, not the original
+    rate's price, before asking a human to approve anything. expires_at
+    matters here more than on a flight/hotel offer: a stale quote_id used
+    for booking after expiry will be rejected by Duffel.
+    """
+
+    quote_id: str
+    rate_id: str
+    total_price_usd: float
+    price_currency_original: str = "USD"
+    payment_type: CarRentalPaymentType
+    expires_at: datetime | None = Field(
+        default=None, description="Quotes expire; re-fetch after this time before booking"
+    )
+
+
+class ProposeCarBookingInput(BaseModel):
+    """Input contract for propose_booking() when booking_type is CAR.
+
+    Takes BOTH the original CarRateOption (for display fields — car
+    description, supplier, pickup/dropoff names and times — none of which
+    Duffel's quote response repeats) AND the CarQuoteResult (the FIRM price,
+    not the rate's estimate) plus the driver's details, which Duffel's real
+    booking endpoint requires but which search/quote never needed.
+    propose_booking() persists this as a CarRentalOption row itself — same
+    pattern as the flight/hotel inputs.
+    """
+
+    trip_id: str = Field(description="UUID string of an existing Trip")
+    rate: CarRateOption
+    quote: CarQuoteResult
+    driver: DriverDetails
+
+    @model_validator(mode="after")
+    def quote_matches_rate(self) -> ProposeCarBookingInput:
+        if self.quote.rate_id != self.rate.rate_id:
+            raise ValueError(
+                f"quote.rate_id ({self.quote.rate_id!r}) does not match "
+                f"rate.rate_id ({self.rate.rate_id!r}) — this quote was not fetched "
+                "for this rate."
+            )
+        return self

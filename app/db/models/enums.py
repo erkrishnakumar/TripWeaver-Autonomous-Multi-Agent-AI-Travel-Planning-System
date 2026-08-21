@@ -21,6 +21,7 @@ class TripStatus(enum.StrEnum):
 class BookingType(enum.StrEnum):
     FLIGHT = "flight"
     HOTEL = "hotel"
+    CAR = "car"
 
 
 class BookingStatus(enum.StrEnum):

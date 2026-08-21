@@ -19,6 +19,7 @@ from app.db.models.types import uuid_pk
 
 if TYPE_CHECKING:
     from app.db.models.booking import Booking
+    from app.db.models.car_rental_option import CarRentalOption
     from app.db.models.flight_option import FlightOption
     from app.db.models.hotel_option import HotelOption
     from app.db.models.itinerary import Itinerary
@@ -91,6 +92,11 @@ class Trip(Base, TimestampMixin):
     )
 
     hotel_options: Mapped[list[HotelOption]] = relationship(
+        back_populates="trip",
+        cascade="all, delete-orphan",
+    )
+
+    car_rental_options: Mapped[list[CarRentalOption]] = relationship(
         back_populates="trip",
         cascade="all, delete-orphan",
     )

@@ -39,10 +39,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Approval, Booking, FlightOption, HotelOption
+from app.db.models import Approval, Booking, CarRentalOption, FlightOption, HotelOption
 from app.db.models.enums import ApprovalDecision, BookingStatus, BookingType
 from app.tools.schemas import (
     ProposeBookingResult,
+    ProposeCarBookingInput,
     ProposeFlightBookingInput,
     ProposeHotelBookingInput,
     ToolError,
@@ -86,7 +87,8 @@ async def _write_audit_log(
 
 
 async def propose_booking(
-    session: AsyncSession, query: ProposeFlightBookingInput | ProposeHotelBookingInput
+    session: AsyncSession,
+    query: ProposeFlightBookingInput | ProposeHotelBookingInput | ProposeCarBookingInput,
 ) -> ProposeBookingResult | ToolError:
     """
     Propose a booking for human approval. Writes PENDING_APPROVAL — never
@@ -112,10 +114,18 @@ async def propose_booking(
         booking_type = BookingType.FLIGHT
         provider_offer_id = query.offer.offer_id
         total_price_usd = query.offer.total_price_usd
-    else:
+    elif isinstance(query, ProposeHotelBookingInput):
         booking_type = BookingType.HOTEL
         provider_offer_id = query.listing.search_result_id
         total_price_usd = query.listing.estimated_price_total_usd
+    else:
+        booking_type = BookingType.CAR
+        # Keyed on the FIRM quote_id, not the original rate_id — a quote is
+        # what's actually being proposed for booking, and re-quoting the
+        # same rate later would otherwise collide on the same idempotency
+        # key despite being a distinct proposal.
+        provider_offer_id = query.quote.quote_id
+        total_price_usd = query.quote.total_price_usd
 
     idempotency_key = _make_idempotency_key(query.trip_id, provider_offer_id, booking_type)
 
@@ -133,7 +143,7 @@ async def propose_booking(
             was_existing=True,
         )
 
-    option: FlightOption | HotelOption
+    option: FlightOption | HotelOption | CarRentalOption
     try:
         if isinstance(query, ProposeFlightBookingInput):
             option = FlightOption(
@@ -157,11 +167,12 @@ async def propose_booking(
                 booking_type=booking_type,
                 flight_option_id=option.id,
                 hotel_option_id=None,
+                car_rental_option_id=None,
                 status=BookingStatus.PENDING_APPROVAL,
                 idempotency_key=idempotency_key,
                 total_price_usd=total_price_usd,
             )
-        else:
+        elif isinstance(query, ProposeHotelBookingInput):
             option = HotelOption(
                 id=uuid.uuid4(),
                 trip_id=trip_uuid,
@@ -184,6 +195,40 @@ async def propose_booking(
                 booking_type=booking_type,
                 flight_option_id=None,
                 hotel_option_id=option.id,
+                car_rental_option_id=None,
+                status=BookingStatus.PENDING_APPROVAL,
+                idempotency_key=idempotency_key,
+                total_price_usd=total_price_usd,
+            )
+        else:
+            option = CarRentalOption(
+                id=uuid.uuid4(),
+                trip_id=trip_uuid,
+                provider="duffel",
+                provider_rate_id=query.rate.rate_id,
+                provider_quote_id=query.quote.quote_id,
+                car_description=query.rate.car_description,
+                supplier_name=query.rate.supplier_name,
+                payment_type=query.quote.payment_type.value,
+                total_price_usd=query.quote.total_price_usd,
+                pickup_location_name=query.rate.pickup_location_name,
+                dropoff_location_name=query.rate.dropoff_location_name,
+                pickup_at=query.rate.pickup_at,
+                dropoff_at=query.rate.dropoff_at,
+                driver_details=query.driver.model_dump(mode="json"),
+                is_mock=False,
+                is_selected=True,
+            )
+            session.add(option)
+            await session.flush()
+
+            booking = Booking(
+                id=uuid.uuid4(),
+                trip_id=trip_uuid,
+                booking_type=booking_type,
+                flight_option_id=None,
+                hotel_option_id=None,
+                car_rental_option_id=option.id,
                 status=BookingStatus.PENDING_APPROVAL,
                 idempotency_key=idempotency_key,
                 total_price_usd=total_price_usd,

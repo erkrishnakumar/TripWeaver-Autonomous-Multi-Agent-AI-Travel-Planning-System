@@ -6,24 +6,42 @@ so it can be reached by any MCP client — a CrewAI agent, Claude Desktop, or
 anything else speaking the protocol — without those clients importing
 app.tools directly.
 
-EIGHT tools are exposed. Four are deterministic/LLM lookups from the
+ELEVEN tools are exposed. Four are deterministic/LLM lookups from the
 Phase 1 roadmap (search_flights, get_weather_forecast, search_hotels,
 check_visa_requirements). create_trip is included because an MCP client
-needs a trip_id before it can call either propose_* tool; without it this
+needs a trip_id before it can call any propose_* tool; without it this
 server can't be used end-to-end for its actual purpose. Phase 1's "five
 tools" framing was about the tool layer, not a cap on what Phase 2
 exposes. propose_booking() is split into propose_flight_booking /
-propose_hotel_booking (see below). estimate_ground_transport is a Phase
-2.1 addition — see its own section below for why it exists and why it's
-architecturally different from every other tool here.
+propose_hotel_booking / propose_car_booking (see below).
+estimate_ground_transport is a Phase 2.1 addition — see its own section
+below for why it exists and why it's architecturally different from every
+other tool here. search_car_rentals / get_car_rental_quote / propose_car_
+booking are the Cars rollout — see their own section below for why Cars
+needs two read-only tools instead of one.
 
-propose_booking() is exposed as TWO separate MCP tools rather than one,
+propose_booking() is exposed as THREE separate MCP tools rather than one,
 because its Python signature takes a Union[ProposeFlightBookingInput,
-ProposeHotelBookingInput] — a shape that doesn't map cleanly onto a single
-MCP tool's JSON schema (an LLM client would see one ambiguous "offer_or_
-listing" field instead of two clearly-typed, clearly-named tools). Two
-explicit tools give a calling agent an unambiguous schema and match the
-project's own two separate *BookingInput models in schemas.py.
+ProposeHotelBookingInput, ProposeCarBookingInput] — a shape that doesn't
+map cleanly onto a single MCP tool's JSON schema (an LLM client would see
+one ambiguous "offer_or_listing_or_rate" field instead of three clearly-
+typed, clearly-named tools). Three explicit tools give a calling agent an
+unambiguous schema and match the project's own three separate
+*BookingInput models in schemas.py.
+
+CARS (search_car_rentals / get_car_rental_quote / propose_car_booking):
+unlike Flights (search returns bookable offers directly) or Stays (search
+-> separate firm-rate fetch), Duffel Cars is a real THREE-step flow —
+Search -> Quote -> Booking — see app/tools/car_rentals.py's module
+docstring for the full contract. get_car_rental_quote is exposed as its
+OWN read-only tool (not folded into propose_car_booking) because Duffel's
+own docs say a quote's price can differ from the rate's price, so a
+calling agent must fetch and see the firm quote before a human is ever
+asked to approve anything — collapsing that into propose_car_booking would
+hide the step where the real price is discovered. create_car_rental_booking()
+(the real, money-moving Booking step) is NOT exposed here, and never will
+be from this file — same permanent principle as every other real-booking
+endpoint in this codebase; see app/tools/car_rentals.py's module docstring.
 
 GROUND TRANSPORT (estimate_ground_transport): TripWeaver does NOT
 integrate a ride-hailing API for home<->airport / airport<->hotel legs.
@@ -75,12 +93,20 @@ from fastmcp.exceptions import ToolError as MCPToolError
 from pydantic import BaseModel
 
 from app.db.session import get_session
+from app.tools.car_rentals import get_car_rental_quote as _get_car_rental_quote
+from app.tools.car_rentals import search_car_rentals as _search_car_rentals
 from app.tools.create_trip import create_trip as _create_trip
 from app.tools.flights import search_flights as _search_flights
 from app.tools.ground_transport import estimate_ground_transport as _estimate_ground_transport
 from app.tools.hotels import search_hotels as _search_hotels
 from app.tools.propose_booking import propose_booking as _propose_booking
 from app.tools.schemas import (
+    CarQuoteInput,
+    CarQuoteResult,
+    CarRateOption,
+    CarRentalSearchInput,
+    CarRentalSearchResult,
+    DriverDetails,
     FlightOffer,
     FlightSearchInput,
     FlightSearchResult,
@@ -90,6 +116,7 @@ from app.tools.schemas import (
     HotelSearchInput,
     HotelSearchResult,
     ProposeBookingResult,
+    ProposeCarBookingInput,
     ProposeFlightBookingInput,
     ProposeHotelBookingInput,
     TripSummary,
@@ -118,7 +145,10 @@ mcp = FastMCP(
         "There is no tool here — and there will never be one — that completes a real "
         "booking. estimate_ground_transport gives a rough, non-bookable cost estimate "
         "for legs like home-to-airport or airport-to-hotel — always relay its disclaimer "
-        "field too, and never present the range as a fare quote."
+        "field too, and never present the range as a fare quote. search_car_rentals "
+        "returns car rental rates that are ESTIMATES — always call get_car_rental_quote "
+        "on the chosen rate_id to get a firm price before proposing it for booking via "
+        "propose_car_booking, which NEVER books anything for real either."
     ),
 )
 
@@ -208,6 +238,30 @@ def estimate_ground_transport(
     return _unwrap(_estimate_ground_transport(query))
 
 
+@mcp.tool
+def search_car_rentals(query: CarRentalSearchInput) -> CarRentalSearchResult:
+    """Search for car rental rates for a pickup (and optional dropoff)
+    location and time window.
+
+    IMPORTANT: every rate's price is Duffel's own ESTIMATE — always call
+    get_car_rental_quote on the chosen rate_id before proposing it for
+    booking or presenting a firm price to the traveler.
+    """
+    return _unwrap(_search_car_rentals(query))
+
+
+@mcp.tool
+def get_car_rental_quote(query: CarQuoteInput) -> CarQuoteResult:
+    """Firm up a car rental rate's price — the second step of Duffel's
+    Search -> Quote -> Booking Cars flow.
+
+    Duffel's docs are explicit that a quote's price can differ from the
+    original rate's price — always use THIS tool's price, never the rate's
+    own estimated_price_total_usd, once a specific rate has been chosen.
+    """
+    return _unwrap(_get_car_rental_quote(query))
+
+
 # ---------------------------------------------------------------------------
 # DB-backed tools — one session per call, committed within that call.
 # ---------------------------------------------------------------------------
@@ -224,7 +278,6 @@ async def create_trip(
     requester_email: str | None = None,
 ) -> TripSummary:
     """Create a new trip in DRAFT status and return its id.
-
     This is the required entry point for any stateful flow through this
     server: the returned `id` is the trip_id that propose_flight_booking
     and propose_hotel_booking need. IATA codes are upper-cased
@@ -319,6 +372,40 @@ async def propose_hotel_booking(
         except Exception:
             await session.rollback()
             logger.exception("propose_hotel_booking commit failed")
+            raise MCPToolError(
+                "Could not persist the booking proposal due to a database error."
+            ) from None
+        return result
+
+
+@mcp.tool
+async def propose_car_booking(
+    trip_id: str, rate: CarRateOption, quote: CarQuoteResult, driver: DriverDetails
+) -> ProposeBookingResult:
+    """Propose a car rental booking for human approval.
+
+    Writes a PENDING_APPROVAL booking row — this NEVER calls a real
+    provider booking endpoint, and never will. `rate` should be one of the
+    CarRateOption objects returned by search_car_rentals, and `quote` MUST
+    be the CarQuoteResult from calling get_car_rental_quote on that exact
+    rate's rate_id (a mismatch is rejected). `driver` PII is required by
+    Duffel's real booking contract even though search/quote never needed
+    it — this is more sensitive data than any other tool in this file
+    collects. Calling this twice with the same trip_id + quote is safe: the
+    second call returns the same pending booking with was_existing=true
+    instead of creating a duplicate.
+    """
+    query = ProposeCarBookingInput(trip_id=trip_id, rate=rate, quote=quote, driver=driver)
+    async with get_session() as session:
+        result = await _propose_booking(session, query)
+        if isinstance(result, DomainToolError):
+            await session.rollback()
+            raise MCPToolError(f"[{result.error_type}] {result.message}")
+        try:
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("propose_car_booking commit failed")
             raise MCPToolError(
                 "Could not persist the booking proposal due to a database error."
             ) from None

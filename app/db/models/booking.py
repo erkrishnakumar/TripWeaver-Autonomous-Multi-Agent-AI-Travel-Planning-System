@@ -29,6 +29,7 @@ from app.db.models.types import uuid_pk
 
 if TYPE_CHECKING:
     from app.db.models.approval import Approval
+    from app.db.models.car_rental_option import CarRentalOption
     from app.db.models.flight_option import FlightOption
     from app.db.models.hotel_option import HotelOption
     from app.db.models.trip import Trip
@@ -67,6 +68,14 @@ class Booking(Base, TimestampMixin):
     hotel_option_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey(
             "hotel_options.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    car_rental_option_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "car_rental_options.id",
             ondelete="SET NULL",
         ),
         nullable=True,
@@ -113,6 +122,10 @@ class Booking(Base, TimestampMixin):
     )
 
     hotel_option: Mapped[HotelOption | None] = relationship(
+        back_populates="bookings",
+    )
+
+    car_rental_option: Mapped[CarRentalOption | None] = relationship(
         back_populates="bookings",
     )
 

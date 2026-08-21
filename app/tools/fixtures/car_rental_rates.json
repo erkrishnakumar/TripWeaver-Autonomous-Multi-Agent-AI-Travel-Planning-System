@@ -1,0 +1,102 @@
+{
+  "ATLANTA": [
+    {
+      "id": "rat_mock_atl_001",
+      "total_amount": "145.00",
+      "total_currency": "USD",
+      "base_amount": "120.00",
+      "base_currency": "USD",
+      "payment_type": "prepaid",
+      "supplier": {
+        "name": "Hertz",
+        "logo_url": "https://example.com/hertz.png"
+      },
+      "car": {
+        "name": "Toyota Corolla",
+        "code": "CDAR",
+        "category": "Compact",
+        "type": "car",
+        "transmission": "automatic",
+        "fuel": "petrol",
+        "max_passengers": 5,
+        "air_conditioning": true,
+        "baggage": {"small": 1, "large": 1},
+        "images": []
+      }
+    },
+    {
+      "id": "rat_mock_atl_002",
+      "total_amount": "89.50",
+      "total_currency": "USD",
+      "base_amount": "80.00",
+      "base_currency": "USD",
+      "payment_type": "postpaid",
+      "supplier": {
+        "name": "Enterprise",
+        "logo_url": "https://example.com/enterprise.png"
+      },
+      "car": {
+        "name": "Chevrolet Spark",
+        "code": "MBMR",
+        "category": "Economy",
+        "type": "car",
+        "transmission": "automatic",
+        "fuel": "petrol",
+        "max_passengers": 4,
+        "air_conditioning": true,
+        "baggage": {"small": 1, "large": 0},
+        "images": []
+      }
+    },
+    {
+      "id": "rat_mock_atl_003",
+      "total_amount": "312.00",
+      "total_currency": "USD",
+      "base_amount": "260.00",
+      "base_currency": "USD",
+      "payment_type": "guarantee",
+      "supplier": {
+        "name": "Avis",
+        "logo_url": "https://example.com/avis.png"
+      },
+      "car": {
+        "name": "Jeep Grand Cherokee",
+        "code": "FFAR",
+        "category": "SUV",
+        "type": "car",
+        "transmission": "automatic",
+        "fuel": "petrol",
+        "max_passengers": 5,
+        "air_conditioning": true,
+        "baggage": {"small": 2, "large": 3},
+        "images": []
+      }
+    }
+  ],
+  "DEFAULT": [
+    {
+      "id": "rat_mock_default_001",
+      "total_amount": "99.00",
+      "total_currency": "USD",
+      "base_amount": "85.00",
+      "base_currency": "USD",
+      "payment_type": "postpaid",
+      "supplier": {
+        "name": "Budget",
+        "logo_url": "https://example.com/budget.png"
+      },
+      "car": {
+        "name": "Nissan Versa",
+        "code": "ECAR",
+        "category": "Economy",
+        "type": "car",
+        "transmission": "automatic",
+        "fuel": "petrol",
+        "max_passengers": 5,
+        "air_conditioning": true,
+        "baggage": {"small": 1, "large": 1},
+        "images": []
+      }
+    }
+  ]
+}
