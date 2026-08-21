@@ -40,6 +40,7 @@ dev = [
     "pytest-httpx>=0.30",
     "ruff>=0.5",
     "mypy>=1.10",
+    "pre-commit>=4.0",
 ]
 
 
@@ -59,7 +60,7 @@ select = [
 
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 ignore_missing_imports = true
 

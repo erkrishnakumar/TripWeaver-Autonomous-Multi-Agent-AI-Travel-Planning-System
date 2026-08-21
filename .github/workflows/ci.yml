@@ -15,7 +15,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          uv sync --extra dev
+          uv sync --extra dev --extra agents --extra mcp
 
       - name: Lint (ruff)
         run: |
@@ -33,7 +33,7 @@ jobs:
       - name: Type check (mypy)
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          uv run mypy tools/
+          uv run mypy app/
 
       - name: Run tests
         run: |
