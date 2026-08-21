@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -78,11 +79,13 @@ def _is_retryable_stays_error(exc: BaseException) -> bool:
     return isinstance(exc, DuffelStaysAPIError) and exc.retryable
 
 
-def _build_stays_search_payload(query: HotelSearchInput, latitude: float, longitude: float) -> dict:
+def _build_stays_search_payload(
+    query: HotelSearchInput, latitude: float, longitude: float
+) -> dict[str, Any]:
     """Matches Duffel's real POST /stays/search contract:
     https://duffel.com/docs/api/v2/search/search-for-accommodation
     """
-    guests: list[dict] = [{"type": "adult"} for _ in range(query.adults)]
+    guests: list[dict[str, Any]] = [{"type": "adult"} for _ in range(query.adults)]
     guests += [{"type": "child", "age": child.age} for child in query.children]
 
     return {
@@ -95,12 +98,11 @@ def _build_stays_search_payload(query: HotelSearchInput, latitude: float, longit
             "check_in_date": str(query.check_in),
             "check_out_date": str(query.check_out),
             "guests": guests,
-            "accommodation": {"fetch_rates": False},
         }
     }
 
 
-def _parse_search_result(raw: dict, nights: int) -> HotelListing:
+def _parse_search_result(raw: dict[str, Any], nights: int) -> HotelListing:
     """Matches Duffel's real Search Result schema:
     https://duffel.com/docs/api/v2/search-result/schema
 
@@ -136,7 +138,7 @@ def _parse_search_result(raw: dict, nights: int) -> HotelListing:
     retry=retry_if_exception(_is_retryable_stays_error),
     reraise=True,
 )
-def _post_stays_search(payload: dict) -> dict:
+def _post_stays_search(payload: dict[str, Any]) -> dict[str, Any]:
     with httpx.Client(timeout=15.0) as client:
         resp = client.post(
             f"{settings.duffel_base_url}{_STAYS_SEARCH_PATH}",
@@ -147,10 +149,10 @@ def _post_stays_search(payload: dict) -> dict:
         retryable = resp.status_code in _RETRYABLE_STATUS_CODES
         message = f"Duffel Stays API returned {resp.status_code}: {resp.text[:300]}"
         raise DuffelStaysAPIError(resp.status_code, message, retryable)
-    return resp.json()
+    return cast(dict[str, Any], resp.json())
 
 
-def _load_mock_results(location_key: str) -> list[dict]:
+def _load_mock_results(location_key: str) -> list[dict[str, Any]]:
     with open(_FIXTURES_PATH) as f:
         fixtures = json.load(f)
     if location_key not in fixtures and "DEFAULT" not in fixtures:
@@ -158,7 +160,7 @@ def _load_mock_results(location_key: str) -> list[dict]:
             f"No fixture entry for '{location_key}' and no 'DEFAULT' fallback exists in "
             f"{_FIXTURES_PATH.name} — add one or the other."
         )
-    return fixtures.get(location_key, fixtures.get("DEFAULT", []))
+    return cast(list[dict[str, Any]], fixtures.get(location_key, fixtures.get("DEFAULT", [])))
 
 
 def search_hotels(query: HotelSearchInput) -> HotelSearchResult | ToolError:
@@ -211,6 +213,8 @@ def search_hotels(query: HotelSearchInput) -> HotelSearchResult | ToolError:
                     )
                 latitude, longitude, resolved_name = geocoded
             else:
+                # Guaranteed non-None here by HotelSearchInput.exactly_one_location.
+                assert query.latitude is not None and query.longitude is not None
                 latitude, longitude = query.latitude, query.longitude
                 resolved_name = f"{latitude:.4f}, {longitude:.4f}"
         except GeocodingAPIError as e:
@@ -254,7 +258,8 @@ def search_hotels(query: HotelSearchInput) -> HotelSearchResult | ToolError:
         listings = [
             listing
             for listing in listings
-            if (listing.estimated_price_total_usd / max(nights, 1)) <= query.max_budget_usd_per_night
+            if (listing.estimated_price_total_usd / max(nights, 1))
+            <= query.max_budget_usd_per_night
         ]
 
     listings.sort(key=lambda listing: listing.estimated_price_total_usd)
@@ -283,7 +288,10 @@ if __name__ == "__main__":
     if isinstance(result, ToolError):
         print(f"[ERROR] {result.error_type}: {result.message}")
     else:
-        print(f"Found {len(result.listings)} listings near {result.resolved_location_name} (mock={result.is_mock}):")
+        print(
+            f"Found {len(result.listings)} listings near "
+            f"{result.resolved_location_name} (mock={result.is_mock}):"
+        )
         for listing in result.listings[:5]:
             print(
                 f"  {listing.hotel_name}: ~${listing.estimated_price_total_usd} "

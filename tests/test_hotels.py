@@ -114,7 +114,9 @@ def test_returns_listings_sorted_by_price(httpx_mock, city_query):
     config.settings.duffel_api_key = "duffel_test_fake_key"
 
     httpx_mock.add_response(url=GEOCODE_URL_RE, json=MOCK_GEOCODE_RESPONSE, status_code=200)
-    httpx_mock.add_response(url=STAYS_SEARCH_URL_RE, json=MOCK_STAYS_SEARCH_RESPONSE, status_code=200)
+    httpx_mock.add_response(
+        url=STAYS_SEARCH_URL_RE, json=MOCK_STAYS_SEARCH_RESPONSE, status_code=200
+    )
 
     result = search_hotels(city_query)
 
@@ -139,7 +141,9 @@ def test_lat_lon_input_skips_geocoding(httpx_mock, coord_query):
 
     config.settings.duffel_api_key = "duffel_test_fake_key"
 
-    httpx_mock.add_response(url=STAYS_SEARCH_URL_RE, json=MOCK_STAYS_SEARCH_RESPONSE, status_code=200)
+    httpx_mock.add_response(
+        url=STAYS_SEARCH_URL_RE, json=MOCK_STAYS_SEARCH_RESPONSE, status_code=200
+    )
 
     result = search_hotels(coord_query)
 
@@ -151,13 +155,19 @@ def test_lat_lon_input_skips_geocoding(httpx_mock, coord_query):
 def test_request_payload_matches_real_duffel_contract(httpx_mock):
     """Locks in the verified request shape: rooms (int), location.radius
     (not radius_km), guests as typed list with per-child age, snake_case
-    dates as strings, accommodation.fetch_rates: false."""
+    dates as strings. No top-level "accommodation" key for a location-based
+    search — Duffel's real API treats "accommodation" as the alternate,
+    mutually-exclusive ID-based search mode and 422s with "accommodation.ids
+    can't be blank" if it's present without ids, as confirmed against a live
+    sandbox call."""
     from app import config
 
     config.settings.duffel_api_key = "duffel_test_fake_key"
 
     httpx_mock.add_response(url=GEOCODE_URL_RE, json=MOCK_GEOCODE_RESPONSE, status_code=200)
-    httpx_mock.add_response(url=STAYS_SEARCH_URL_RE, json=MOCK_STAYS_SEARCH_RESPONSE, status_code=200)
+    httpx_mock.add_response(
+        url=STAYS_SEARCH_URL_RE, json=MOCK_STAYS_SEARCH_RESPONSE, status_code=200
+    )
 
     query = HotelSearchInput(
         city="Atlanta",
@@ -176,8 +186,11 @@ def test_request_payload_matches_real_duffel_contract(httpx_mock):
 
     assert payload["rooms"] == 2
     assert payload["location"]["radius"] == 15
-    assert payload["location"]["geographic_coordinates"] == {"latitude": 33.749, "longitude": -84.388}
-    assert payload["accommodation"] == {"fetch_rates": False}
+    assert payload["location"]["geographic_coordinates"] == {
+        "latitude": 33.749,
+        "longitude": -84.388,
+    }
+    assert "accommodation" not in payload
     assert {"type": "adult"} in payload["guests"]
     assert {"type": "child", "age": 7} in payload["guests"]
     assert sum(1 for g in payload["guests"] if g["type"] == "adult") == 2
@@ -191,7 +204,9 @@ def test_budget_filter_is_per_night_not_total(httpx_mock):
     config.settings.duffel_api_key = "duffel_test_fake_key"
 
     httpx_mock.add_response(url=GEOCODE_URL_RE, json=MOCK_GEOCODE_RESPONSE, status_code=200)
-    httpx_mock.add_response(url=STAYS_SEARCH_URL_RE, json=MOCK_STAYS_SEARCH_RESPONSE, status_code=200)
+    httpx_mock.add_response(
+        url=STAYS_SEARCH_URL_RE, json=MOCK_STAYS_SEARCH_RESPONSE, status_code=200
+    )
 
     query = HotelSearchInput(
         city="Atlanta",
