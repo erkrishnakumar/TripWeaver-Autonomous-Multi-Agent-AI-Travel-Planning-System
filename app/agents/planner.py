@@ -19,11 +19,11 @@ from app.agents.researcher import build_researcher_llm
 def build_planner_agent(llm: LLM | None = None) -> Agent:
     """Build the itinerary-planner Agent.
 
-    Reuses build_researcher_llm()'s Ollama configuration rather than
-    duplicating it — both agents reason with the same local model in this
-    phase; that's a starting point, not a permanent constraint (a future
-    phase could give the planner a different/larger model without
-    touching the researcher).
+    Reuses build_researcher_llm()'s provider selection (LLM_PROVIDER in
+    .env — Ollama by default) rather than duplicating it, so both agents
+    always reason with the same backend. That's a starting point, not a
+    permanent constraint (a future phase could give the planner a
+    different/larger model without touching the researcher).
     """
     return Agent(
         role="Itinerary Planner",

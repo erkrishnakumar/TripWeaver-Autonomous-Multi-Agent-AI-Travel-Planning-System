@@ -22,7 +22,11 @@ dependencies = [
 [project.optional-dependencies]
 
 agents = [
-    "crewai>=0.80",
+    # [litellm] is required for LLM_PROVIDER=groq (app/config.py) --
+    # CrewAI's LLM class only natively supports a fixed provider list
+    # (openai, anthropic, google/gemini, ollama, ...) without it; Groq
+    # specifically needs the full litellm fallback package.
+    "crewai[litellm]>=1.15.16",
 ]
 
 mcp = [

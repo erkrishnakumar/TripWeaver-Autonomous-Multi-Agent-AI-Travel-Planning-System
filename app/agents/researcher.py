@@ -7,10 +7,14 @@ singleton, so tests can construct a fresh Agent per test without shared
 mutable state, and so the LLM/tool wiring is explicit at the call site
 rather than hidden behind import-time side effects.
 
-Uses Ollama (local-first, per app/config.py's ollama_base_url/ollama_model
-settings) — matching the project's stated local-first architecture. Groq
-remains the narrow, explicit exception used only by check_visa_requirements
-internally; agent reasoning itself stays local.
+Defaults to Ollama (local-first, per app/config.py's ollama_base_url/
+ollama_model settings) — matching the project's stated local-first
+architecture. Set LLM_PROVIDER=groq or LLM_PROVIDER=gemini in .env to
+switch both the researcher and planner agents to a hosted model instead
+(e.g. for a quick end-to-end test when the local model is too small to
+reason reliably through multi-step tool calls). This is independent of
+Groq's OTHER, narrow use in check_visa_requirements() (app/tools/visa.py),
+which always calls Groq directly regardless of this setting.
 """
 
 from __future__ import annotations
@@ -22,6 +26,34 @@ from app.config import settings
 
 
 def build_researcher_llm() -> LLM:
+    """Builds the LLM shared by both the researcher and planner agents
+    (planner.py imports this function directly rather than duplicating the
+    provider-selection logic). Provider is chosen via LLM_PROVIDER; unset
+    or unrecognized values default to Ollama, never silently to a cloud
+    provider."""
+    provider = settings.llm_provider
+
+    if provider == "groq":
+        if not settings.groq_api_key:
+            raise RuntimeError(
+                "LLM_PROVIDER=groq requires GROQ_API_KEY to be set in .env "
+                "(get a free key from https://console.groq.com/keys)."
+            )
+        return LLM(model=f"groq/{settings.groq_agent_model}", api_key=settings.groq_api_key)
+
+    if provider == "gemini":
+        if not settings.gemini_api_key:
+            raise RuntimeError(
+                "LLM_PROVIDER=gemini requires GEMINI_API_KEY to be set in .env "
+                "(get a free key from https://aistudio.google.com/apikey)."
+            )
+        return LLM(model=f"gemini/{settings.gemini_model}", api_key=settings.gemini_api_key)
+
+    if provider != "ollama":
+        raise RuntimeError(
+            f"Unknown LLM_PROVIDER '{provider}' -- expected 'ollama', 'groq', or 'gemini'."
+        )
+
     return LLM(
         model=f"ollama/{settings.ollama_model}",
         base_url=settings.ollama_base_url,
