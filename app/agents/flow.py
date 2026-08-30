@@ -48,7 +48,7 @@ own, since it just persists whatever object it's handed.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from crewai.flow.flow import Flow, listen, start
 from pydantic import BaseModel, ValidationError
@@ -578,18 +578,18 @@ class _TeeStream:
     encoding, ...) to the first stream so Rich's terminal-capability
     detection still sees the real console, not the log file."""
 
-    def __init__(self, *streams):
+    def __init__(self, *streams: Any) -> None:
         self._streams = streams
 
-    def write(self, data):
+    def write(self, data: str) -> None:
         for s in self._streams:
             s.write(data)
 
-    def flush(self):
+    def flush(self) -> None:
         for s in self._streams:
             s.flush()
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(self._streams[0], name)
 
 
@@ -610,8 +610,8 @@ if __name__ == "__main__":
     # every invocation of this script, not just ones that happen to set
     # PYTHONIOENCODING=utf-8 themselves.
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 
     # Every run's full console output (all the Rich panels a verbose Crew
     # produces -- easily 1000+ lines) is also saved to a timestamped file
