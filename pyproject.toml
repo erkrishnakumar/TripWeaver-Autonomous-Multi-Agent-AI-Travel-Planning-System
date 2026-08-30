@@ -26,7 +26,9 @@ agents = [
     # CrewAI's LLM class only natively supports a fixed provider list
     # (openai, anthropic, google/gemini, ollama, ...) without it; Groq
     # specifically needs the full litellm fallback package.
-    "crewai[litellm]>=1.15.16",
+    # "crewai[litellm]>=1.15.16",
+    "crewai[litellm,google-genai]>=1.15.16"
+
 ]
 
 mcp = [
