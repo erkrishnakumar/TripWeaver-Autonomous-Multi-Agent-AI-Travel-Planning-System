@@ -37,6 +37,9 @@ from app.tools.schemas import (
 )
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+# See the comment at its use site below (search_flights()) for why this
+# exists -- shared with hotels.py/car_rentals.py's identical caps.
+_MAX_RESULTS_RETURNED = 10
 _FIXTURES_PATH = Path(__file__).parent / "fixtures" / "flight_offers.json"
 
 
@@ -170,6 +173,90 @@ def _load_mock_offers(query: FlightSearchInput) -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], fixtures.get(key, fixtures["DEFAULT"]))
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    retry=retry_if_exception(_is_retryable_duffel_error),
+    reraise=True,
+)
+def _get_offer(offer_id: str) -> dict[str, Any]:
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.get(
+            f"{settings.duffel_base_url}/air/offers/{offer_id}",
+            headers=_headers(),
+        )
+    if resp.status_code >= 400:
+        retryable = resp.status_code in _RETRYABLE_STATUS_CODES
+        message = f"Duffel API returned {resp.status_code}: {resp.text[:300]}"
+        raise DuffelAPIError(resp.status_code, message, retryable)
+    return cast(dict[str, Any], resp.json())
+
+
+def get_flight_offer(offer_id: str) -> FlightOffer | ToolError:
+    """
+    Re-fetch a specific offer by ID (GET /air/offers/{id}) to confirm it's a
+    REAL offer Duffel actually issued, and get its current price, before
+    proposing it for booking.
+
+    THIS EXISTS SPECIFICALLY AS A HALLUCINATION GUARD: an LLM agent
+    selecting "the best offer" from search_flights() results can, and in
+    practice does, occasionally fabricate a plausible-looking offer_id
+    instead of copying a real one from its own tool results. propose_
+    booking() has no way to tell a real FlightOffer from an invented one
+    on its own -- it just persists whatever object it's handed. Calling
+    this first and using ITS result (never the caller-supplied FlightOffer)
+    means a fabricated offer_id gets a real 404 from Duffel and is rejected
+    before anything is ever written to the database, the same protection
+    car rentals already had via their mandatory quote re-fetch step.
+
+    Mirrors search_flights()'s mock-mode support: with USE_MOCK_DATA=true,
+    looks the offer up across every fixture location instead of calling
+    the real API.
+    """
+    if settings.use_mock_data:
+        with open(_FIXTURES_PATH) as f:
+            fixtures = json.load(f)
+        for offers in fixtures.values():
+            for raw in offers:
+                if raw["id"] == offer_id:
+                    return _parse_offer(raw)
+        return ToolError(
+            tool_name="get_flight_offer",
+            error_type="offer_not_found",
+            message=f"No mock offer found with id '{offer_id}'.",
+            retryable=False,
+        )
+
+    try:
+        settings.validate_duffel()
+    except RuntimeError as e:
+        return ToolError(
+            tool_name="get_flight_offer",
+            error_type="config_error",
+            message=str(e),
+            retryable=False,
+        )
+
+    try:
+        raw = _get_offer(offer_id)
+    except DuffelAPIError as e:
+        return ToolError(
+            tool_name="get_flight_offer",
+            error_type="duffel_api_error",
+            message=e.message,
+            retryable=e.retryable,
+        )
+    except httpx.TimeoutException:
+        return ToolError(
+            tool_name="get_flight_offer",
+            error_type="timeout",
+            message="Duffel API did not respond within 15s",
+            retryable=True,
+        )
+
+    return _parse_offer(raw.get("data", raw))
+
+
 def search_flights(query: FlightSearchInput) -> FlightSearchResult | ToolError:
     """
     Search for flight offers.
@@ -221,6 +308,10 @@ def search_flights(query: FlightSearchInput) -> FlightSearchResult | ToolError:
         offers = [o for o in offers if o.total_price_usd <= query.max_budget_usd]
 
     offers.sort(key=lambda o: o.total_price_usd)
+    # Cap what's handed back to the agent -- see hotels.py's search_hotels()
+    # for the full rationale (an uncapped result can, by itself, blow a
+    # hosted LLM's per-minute token budget). Already sorted cheapest first.
+    offers = offers[:_MAX_RESULTS_RETURNED]
 
     return FlightSearchResult(
         query=query, offers=offers, provider="duffel", is_sandbox=True, is_mock=is_mock

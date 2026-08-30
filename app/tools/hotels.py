@@ -51,6 +51,9 @@ from app.tools.geocoding import GeocodingAPIError, geocode_city
 from app.tools.schemas import HotelListing, HotelSearchInput, HotelSearchResult, ToolError
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+# See the comment at its use site below (search_hotels()) for why this
+# exists -- shared with flights.py/car_rentals.py's identical caps.
+_MAX_RESULTS_RETURNED = 10
 _FIXTURES_PATH = Path(__file__).parent / "fixtures" / "hotel_offers.json"
 
 _STAYS_SEARCH_PATH = "/stays/search"
@@ -163,6 +166,96 @@ def _load_mock_results(location_key: str) -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], fixtures.get(location_key, fixtures.get("DEFAULT", [])))
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    retry=retry_if_exception(_is_retryable_stays_error),
+    reraise=True,
+)
+def _post_fetch_all_rates(search_result_id: str) -> dict[str, Any]:
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.post(
+            f"{settings.duffel_base_url}/stays/search_results/{search_result_id}"
+            "/actions/fetch_all_rates",
+            headers=_headers(),
+        )
+    if resp.status_code >= 400:
+        retryable = resp.status_code in _RETRYABLE_STATUS_CODES
+        message = f"Duffel Stays API returned {resp.status_code}: {resp.text[:300]}"
+        raise DuffelStaysAPIError(resp.status_code, message, retryable)
+    return cast(dict[str, Any], resp.json())
+
+
+def get_hotel_rate(search_result_id: str, nights: int) -> HotelListing | ToolError:
+    """
+    Re-fetch a specific search result by ID (POST /stays/search_results/
+    {id}/actions/fetch_all_rates) to confirm it's a REAL result Duffel
+    actually returned, and get its current best price, before proposing it
+    for booking.
+
+    THIS EXISTS SPECIFICALLY AS A HALLUCINATION GUARD — same rationale as
+    get_flight_offer() in app/tools/flights.py: an LLM agent selecting "the
+    best listing" from search_hotels() results can fabricate a plausible-
+    looking search_result_id instead of copying a real one from its own
+    tool results. propose_booking() has no way to tell a real HotelListing
+    from an invented one on its own. Calling this first and using ITS
+    result (never the caller-supplied HotelListing) means a fabricated
+    search_result_id gets a real 404 from Duffel and is rejected before
+    anything is ever written to the database.
+
+    The fetch_all_rates response shape (id, cheapest_rate_total_amount/
+    currency, accommodation) matches search_hotels()'s own search result
+    shape closely enough to reuse _parse_search_result() directly — verified
+    against Duffel's real docs, not assumed.
+
+    Mirrors search_hotels()'s mock-mode support: with USE_MOCK_DATA=true,
+    looks the result up across every fixture location instead of calling
+    the real API.
+    """
+    if settings.use_mock_data:
+        with open(_FIXTURES_PATH) as f:
+            fixtures = json.load(f)
+        for results in fixtures.values():
+            for raw in results:
+                if raw["id"] == search_result_id:
+                    return _parse_search_result(raw, nights)
+        return ToolError(
+            tool_name="get_hotel_rate",
+            error_type="search_result_not_found",
+            message=f"No mock search result found with id '{search_result_id}'.",
+            retryable=False,
+        )
+
+    try:
+        settings.validate_duffel()
+    except RuntimeError as e:
+        return ToolError(
+            tool_name="get_hotel_rate",
+            error_type="config_error",
+            message=str(e),
+            retryable=False,
+        )
+
+    try:
+        raw = _post_fetch_all_rates(search_result_id)
+    except DuffelStaysAPIError as e:
+        return ToolError(
+            tool_name="get_hotel_rate",
+            error_type="duffel_api_error",
+            message=e.message,
+            retryable=e.retryable,
+        )
+    except httpx.TimeoutException:
+        return ToolError(
+            tool_name="get_hotel_rate",
+            error_type="timeout",
+            message="Duffel Stays API did not respond within 15s",
+            retryable=True,
+        )
+
+    return _parse_search_result(raw.get("data", raw), nights)
+
+
 def search_hotels(query: HotelSearchInput) -> HotelSearchResult | ToolError:
     """
     Search for hotels near a city or lat/lon, with an ESTIMATED price per
@@ -263,6 +356,13 @@ def search_hotels(query: HotelSearchInput) -> HotelSearchResult | ToolError:
         ]
 
     listings.sort(key=lambda listing: listing.estimated_price_total_usd)
+    # Cap what's handed back to the agent -- verified live: an uncapped
+    # Duffel Stays search can return 50+ listings, and feeding all of them
+    # back into a hosted LLM's next completion call is, by itself, enough to
+    # blow a free-tier per-minute token budget (Groq's 8000 TPM, hit
+    # instantly by a single 52-listing result). Already sorted cheapest
+    # first, so keeping the top N keeps the most relevant options anyway.
+    listings = listings[:_MAX_RESULTS_RETURNED]
 
     return HotelSearchResult(
         query=query,

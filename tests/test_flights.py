@@ -16,8 +16,14 @@ from datetime import date, timedelta
 
 import pytest
 
-from app.tools.flights import search_flights
-from app.tools.schemas import CabinClass, FlightSearchInput, FlightSearchResult, ToolError
+from app.tools.flights import get_flight_offer, search_flights
+from app.tools.schemas import (
+    CabinClass,
+    FlightOffer,
+    FlightSearchInput,
+    FlightSearchResult,
+    ToolError,
+)
 
 MOCK_OFFER_RESPONSE = {
     "data": {
@@ -332,3 +338,64 @@ def test_mock_mode_falls_back_to_default_for_unknown_route():
 
     assert isinstance(result, FlightSearchResult)
     assert result.offers[0].offer_id == "mock_off_generic_001"
+
+
+class TestGetFlightOffer:
+    """get_flight_offer() is a hallucination guard (see flow.py's module
+    docstring): it re-fetches a specific offer by ID from Duffel so a
+    fabricated offer_id an LLM invented gets a real 404, instead of
+    propose_booking() blindly persisting whatever it's handed."""
+
+    def test_returns_the_real_offer_by_id(self, httpx_mock):
+        from app import config
+
+        config.settings.duffel_api_key = "duffel_test_fake_key"
+
+        httpx_mock.add_response(
+            url="https://api.duffel.com/air/offers/off_00009htYpSCXrwaB9DnUm0",
+            json={"data": MOCK_OFFER_RESPONSE["data"]["offers"][0]},
+            status_code=200,
+        )
+
+        result = get_flight_offer("off_00009htYpSCXrwaB9DnUm0")
+
+        assert isinstance(result, FlightOffer)
+        assert result.offer_id == "off_00009htYpSCXrwaB9DnUm0"
+        assert result.total_price_usd == 450.00
+
+    def test_fabricated_offer_id_returns_tool_error_not_exception(self, httpx_mock):
+        from app import config
+
+        config.settings.duffel_api_key = "duffel_test_fake_key"
+
+        httpx_mock.add_response(
+            url="https://api.duffel.com/air/offers/off_fabricated_by_llm",
+            status_code=404,
+            json={"errors": [{"message": "not found"}]},
+        )
+
+        result = get_flight_offer("off_fabricated_by_llm")
+
+        assert isinstance(result, ToolError)
+        assert result.tool_name == "get_flight_offer"
+        assert result.retryable is False
+
+    def test_mock_mode_finds_offer_across_fixture_locations(self):
+        from app import config
+
+        config.settings.use_mock_data = True
+
+        result = get_flight_offer("mock_off_generic_001")
+
+        assert isinstance(result, FlightOffer)
+        assert result.offer_id == "mock_off_generic_001"
+
+    def test_mock_mode_unknown_id_returns_tool_error(self):
+        from app import config
+
+        config.settings.use_mock_data = True
+
+        result = get_flight_offer("does_not_exist_anywhere")
+
+        assert isinstance(result, ToolError)
+        assert result.error_type == "offer_not_found"

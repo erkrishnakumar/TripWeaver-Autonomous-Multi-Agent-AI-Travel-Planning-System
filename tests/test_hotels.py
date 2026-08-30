@@ -17,8 +17,14 @@ from datetime import date, timedelta
 
 import pytest
 
-from app.tools.hotels import search_hotels
-from app.tools.schemas import ChildGuest, HotelSearchInput, HotelSearchResult, ToolError
+from app.tools.hotels import get_hotel_rate, search_hotels
+from app.tools.schemas import (
+    ChildGuest,
+    HotelListing,
+    HotelSearchInput,
+    HotelSearchResult,
+    ToolError,
+)
 
 GEOCODE_URL_RE = re.compile(r"^https://geocoding-api\.open-meteo\.com/v1/search(\?.*)?$")
 STAYS_SEARCH_URL_RE = re.compile(r"^https://api\.duffel\.com/stays/search(\?.*)?$")
@@ -396,3 +402,69 @@ def test_child_guest_requires_age():
 def test_child_guest_rejects_negative_age():
     with pytest.raises(ValueError):
         ChildGuest(age=-1)
+
+
+class TestGetHotelRate:
+    """get_hotel_rate() is a hallucination guard (see flow.py's module
+    docstring): it re-fetches a specific search result by ID from Duffel's
+    real fetch_all_rates endpoint so a fabricated search_result_id an LLM
+    invented gets a real 404, instead of propose_booking() blindly
+    persisting whatever it's handed."""
+
+    def test_returns_the_real_listing_by_id(self, httpx_mock):
+        from app import config
+
+        config.settings.duffel_api_key = "duffel_test_fake_key"
+
+        httpx_mock.add_response(
+            url="https://api.duffel.com/stays/search_results/srr_off_001/actions/fetch_all_rates",
+            json={"data": MOCK_STAYS_SEARCH_RESPONSE["data"]["results"][0]},
+            status_code=200,
+        )
+
+        result = get_hotel_rate("srr_off_001", nights=3)
+
+        assert isinstance(result, HotelListing)
+        assert result.search_result_id == "srr_off_001"
+        assert result.estimated_price_total_usd == 540.00
+        assert result.nights == 3
+
+    def test_fabricated_search_result_id_returns_tool_error_not_exception(self, httpx_mock):
+        from app import config
+
+        config.settings.duffel_api_key = "duffel_test_fake_key"
+
+        httpx_mock.add_response(
+            url=(
+                "https://api.duffel.com/stays/search_results/"
+                "srr_fabricated_by_llm/actions/fetch_all_rates"
+            ),
+            status_code=404,
+            json={"errors": [{"message": "not found"}]},
+        )
+
+        result = get_hotel_rate("srr_fabricated_by_llm", nights=3)
+
+        assert isinstance(result, ToolError)
+        assert result.tool_name == "get_hotel_rate"
+        assert result.retryable is False
+
+    def test_mock_mode_finds_result_across_fixture_locations(self):
+        from app import config
+
+        config.settings.use_mock_data = True
+
+        result = get_hotel_rate("srr_mock_atl_001", nights=3)
+
+        assert isinstance(result, HotelListing)
+        assert result.search_result_id == "srr_mock_atl_001"
+
+    def test_mock_mode_unknown_id_returns_tool_error(self):
+        from app import config
+
+        config.settings.use_mock_data = True
+
+        result = get_hotel_rate("does_not_exist_anywhere", nights=3)
+
+        assert isinstance(result, ToolError)
+        assert result.error_type == "search_result_not_found"
