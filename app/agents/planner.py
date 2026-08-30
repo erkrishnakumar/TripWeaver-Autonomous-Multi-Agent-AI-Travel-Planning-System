@@ -14,6 +14,7 @@ from __future__ import annotations
 from crewai import LLM, Agent
 
 from app.agents.researcher import build_researcher_llm
+from app.config import settings
 
 
 def build_planner_agent(llm: LLM | None = None) -> Agent:
@@ -40,6 +41,6 @@ def build_planner_agent(llm: LLM | None = None) -> Agent:
             "surfaced explicitly as a caveat, not smoothed over."
         ),
         tools=[],
-        llm=llm or build_researcher_llm(),
-        verbose=False,
+        llm=llm or build_researcher_llm(settings.planner_llm_provider or None),
+        verbose=True,
     )
