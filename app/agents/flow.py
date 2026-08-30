@@ -373,7 +373,14 @@ class TripPlanningFlow(Flow[TripPlanningState]):
         PENDING_APPROVAL rows via propose_booking() — still NEVER a real
         booking; see module docstring."""
         if not approved:
-            self.state.error = "Plan was not approved by the human reviewer."
+            # _add_error(), not a direct assignment -- found live while
+            # writing the Phase 7 evals: this used to overwrite (not
+            # append to) an earlier real error (e.g. "Research step
+            # failed: <rate limit>"), silently discarding it the moment a
+            # human rejected the resulting bad plan, which is exactly the
+            # failure mode _add_error() exists to prevent (see its own
+            # docstring above).
+            self._add_error("Plan was not approved by the human reviewer.")
             return
 
         research_output = self.state.research_output

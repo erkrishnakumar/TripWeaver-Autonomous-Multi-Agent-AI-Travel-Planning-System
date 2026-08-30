@@ -23,7 +23,9 @@ tripweaver/
 │   └── config.py          # Centralized settings (env vars) — see Local setup below
 ├── alembic/              # Alembic migration environment + versions
 ├── docs/                 # Design docs, roadmap, incident writeups (see Documentation below)
-├── tests/                # Unit + integration tests (106 passing)
+├── tests/                # Unit + integration tests (162 passing), including
+│                         #   test_agent_evals.py — Phase 7 regression evals for
+│                         #   real LLM/provider failure modes (see Status below)
 ├── .github/workflows/    # CI pipeline (ruff, mypy, pytest)
 ├── .pre-commit-config.yaml  # Local pre-commit hooks (ruff check --fix + ruff format)
 └── docker-compose.yml    # Local Postgres for Phase 5+
@@ -146,7 +148,7 @@ a real mypy/CI incident and fix.
 - [ ] Phase 4: real confirm/reject API endpoint (propose_booking() itself is done; see Phase 8)
 - [x] Phase 5: Postgres persistence — models done and tested; real Postgres round-trip not yet verified
 - [ ] Phase 6: observability
-- [ ] Phase 7: CI evals
+- [x] Phase 7 (v1): agent evals — `tests/test_agent_evals.py` encodes real observed LLM/provider failure modes (hallucinated/placeholder ids, empty-dict "nothing found", provider rate-limit crashes, missing-input hotel search) as deterministic regression tests. **Still open**: live-LLM-output-quality evals against a real/recorded provider — see `docs/TripWeaver_Roadmap.md`
 - [ ] Phase 8: API layer
 - [ ] Phase 9: deployment
 
