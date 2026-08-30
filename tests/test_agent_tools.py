@@ -53,12 +53,7 @@ class TestSearchFlightsTool:
         monkeypatch.setattr(agent_tools, "_search_flights", lambda query: fake_result)
 
         raw = agent_tools.search_flights_tool.run(
-            query={
-                "origin": "JFK",
-                "destination": "ATL",
-                "depart_date": "2026-09-14",
-                "adults": 1,
-            }
+            origin="JFK", destination="ATL", depart_date="2026-09-14", adults=1
         )
 
         assert isinstance(raw, str)
@@ -79,12 +74,7 @@ class TestSearchFlightsTool:
         )
 
         raw = agent_tools.search_flights_tool.run(
-            query={
-                "origin": "JFK",
-                "destination": "ATL",
-                "depart_date": "2026-09-14",
-                "adults": 1,
-            }
+            origin="JFK", destination="ATL", depart_date="2026-09-14", adults=1
         )
 
         assert raw == "ERROR [config_error]: DUFFEL_API_KEY is not set."
@@ -108,7 +98,7 @@ class TestEstimateGroundTransportTool:
         monkeypatch.setattr(agent_tools, "_estimate_ground_transport", lambda query: fake_result)
 
         raw = agent_tools.estimate_ground_transport_tool.run(
-            query={"origin_city": "Home", "destination_city": "Airport"}
+            origin_city="Home", destination_city="Airport"
         )
 
         parsed = json.loads(raw)
@@ -130,73 +120,79 @@ class TestAllResearchToolsList:
 
 
 class TestRealCrewAIInvocationPath:
-    """Regression tests for a real bug: CrewAI's BaseTool.run() ->
-    _validate_kwargs() calls `self.args_schema.model_validate(kwargs).
-    model_dump()` before invoking the wrapped function — and Pydantic's
-    model_dump() ALWAYS serializes nested BaseModel fields down to plain
-    dicts. That means every wrapper's `query` parameter arrives as a plain
-    dict on any real CrewAI tool call, not as the schema instance its type
-    hint promises.
+    """Regression tests for a real bug: every tool wrapper used to take a
+    single nested `query: SomeInput` parameter, which made CrewAI generate
+    a tool schema shaped like {"query": {"$ref": "#/$defs/..."}}. In
+    practice, models (observed with both a local Ollama qwen3:14b and
+    hosted Groq models) reliably flatten that extra nesting level away and
+    call the tool with the inner fields directly at the top level, which
+    then failed Pydantic validation on `query` being a required field
+    that's simply missing.
 
-    Every OTHER test in this file monkeypatches the underlying app.tools.*
-    function with a lambda that ignores its argument's shape — which is
-    exactly what hid this bug through the whole Phase 3 build. These tests
-    deliberately do NOT monkeypatch the underlying function, and call
-    .run() with a plain dict (not a schema instance) to mirror exactly what
-    a real agent's tool-calling loop sends, so a regression here fails
+    The fix was to make every wrapper take its underlying fields as flat,
+    top-level parameters and build the Input model itself. These tests
+    call .run() with flat kwargs (mirroring what a real agent's tool-
+    calling loop sends) against the real, non-monkeypatched underlying
+    function, so a regression back to a nested `query` parameter fails
     loudly instead of silently.
     """
 
-    def test_search_flights_tool_survives_a_plain_dict_query(self, monkeypatch):
+    def test_search_flights_tool_survives_flat_kwargs(self, monkeypatch):
         from app import config
 
         monkeypatch.setattr(config.settings, "use_mock_data", True)
 
         raw = agent_tools.search_flights_tool.run(
-            query={
-                "origin": "JFK",
-                "destination": "ATL",
-                "depart_date": "2026-09-14",
-                "adults": 1,
-            }
+            origin="JFK", destination="ATL", depart_date="2026-09-14", adults=1
         )
         assert not raw.startswith("ERROR [")
         assert "offers" in json.loads(raw)
 
-    def test_search_car_rentals_tool_survives_a_plain_dict_query(self, monkeypatch):
+    def test_search_car_rentals_tool_survives_flat_kwargs(self, monkeypatch):
         from app import config
 
         monkeypatch.setattr(config.settings, "use_mock_data", True)
 
         raw = agent_tools.search_car_rentals_tool.run(
-            query={
-                "pickup_city": "Atlanta",
-                "pickup_at": "2026-09-14T10:00:00",
-                "dropoff_at": "2026-09-17T10:00:00",
-                "driver_age": 30,
-                "driver_country_code": "US",
-            }
+            pickup_city="Atlanta",
+            pickup_at="2026-09-14T10:00:00",
+            dropoff_at="2026-09-17T10:00:00",
+            driver_age=30,
+            driver_country_code="US",
         )
         assert not raw.startswith("ERROR [")
         parsed = json.loads(raw)
         assert len(parsed["rates"]) > 0
 
-    def test_get_car_rental_quote_tool_survives_a_plain_dict_query(self, monkeypatch):
+    def test_get_car_rental_quote_tool_survives_flat_kwargs(self, monkeypatch):
         from app import config
 
         monkeypatch.setattr(config.settings, "use_mock_data", True)
 
         search_raw = agent_tools.search_car_rentals_tool.run(
-            query={
-                "pickup_city": "Atlanta",
-                "pickup_at": "2026-09-14T10:00:00",
-                "dropoff_at": "2026-09-17T10:00:00",
-                "driver_age": 30,
-                "driver_country_code": "US",
-            }
+            pickup_city="Atlanta",
+            pickup_at="2026-09-14T10:00:00",
+            dropoff_at="2026-09-17T10:00:00",
+            driver_age=30,
+            driver_country_code="US",
         )
         rate_id = json.loads(search_raw)["rates"][0]["rate_id"]
 
-        raw = agent_tools.get_car_rental_quote_tool.run(query={"rate_id": rate_id})
+        raw = agent_tools.get_car_rental_quote_tool.run(rate_id=rate_id)
         assert not raw.startswith("ERROR [")
         assert json.loads(raw)["rate_id"] == rate_id
+
+    def test_search_hotels_tool_survives_flat_kwargs_with_child_ages(self, monkeypatch):
+        from app import config
+
+        monkeypatch.setattr(config.settings, "use_mock_data", True)
+
+        raw = agent_tools.search_hotels_tool.run(
+            city="Atlanta",
+            check_in="2026-09-14",
+            check_out="2026-09-17",
+            adults=2,
+            child_ages=[8],
+        )
+        assert not raw.startswith("ERROR [")
+        assert "listings" in json.loads(raw)

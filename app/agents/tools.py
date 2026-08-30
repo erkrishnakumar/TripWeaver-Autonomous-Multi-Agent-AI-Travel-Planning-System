@@ -32,23 +32,21 @@ always receives readable text regardless of any internal CrewAI
 stringification behavior we haven't independently verified for the full
 agent-execution loop.
 
-ARGUMENT CONTRACT: CrewAI's BaseTool.run() -> _validate_kwargs() does
-`self.args_schema.model_validate(kwargs).model_dump()` before calling this
-module's wrapped function — and Pydantic's model_dump() ALWAYS recursively
-serializes nested BaseModel fields down to plain dicts, never preserving
-them as model instances. That means every wrapper's `query` parameter
-arrives as a plain dict on any real call through CrewAI's actual
-tool-invocation path (i.e. a real agent run), not as the FlightSearchInput/
-etc. instance its type hint promises. Every wrapper below therefore
-re-validates `query` through its schema class before use
-(`FlightSearchInput.model_validate(query)`, etc.) — model_validate() safely
-accepts either a dict OR an already-valid instance of the same class, so
-this is a no-op when called directly with a real instance (e.g. from a
-test) and the actual fix when called through a real agent. This was caught
-by calling .run() with a real (non-monkeypatched) underlying function, not
-by inspecting args_schema or running the existing test suite — every
-existing test monkeypatches the underlying function with a lambda that
-ignores its argument's shape, which is exactly what hid this.
+ARGUMENT CONTRACT: every wrapper takes its underlying tool's fields as
+FLAT, top-level parameters (origin, destination, depart_date, ...) instead
+of one nested `query: SomeInput` object, and builds the SomeInput instance
+itself before calling the wrapped function. This is deliberate, not
+incidental: a single nested-object parameter makes CrewAI generate a tool
+schema shaped like {"query": {"$ref": "#/$defs/FlightSearchInput"}}, and
+in practice models (this was observed with both a local Ollama qwen3:14b
+and hosted Groq models) reliably flatten that extra nesting level away and
+call the tool with the inner fields directly at the top level, which then
+fails Pydantic validation on `query` being a required field that's simply
+missing. Flat parameters match the tool-call shape models actually
+produce. Each wrapper still constructs and validates the real Input model
+before calling the wrapped function, so every domain validator (e.g. "give
+either city or lat/lon, not both") still runs — only the OUTER nesting is
+flattened, not the validation.
 
 NO `from __future__ import annotations` IN THIS FILE — DELIBERATELY.
 Every other file in this project uses it, but it breaks CrewAI 1.15.16's
@@ -63,6 +61,8 @@ actually calling .run() on a wrapped tool in a test, not just inspecting
 its generated schema — see tests/test_agent_tools.py.
 """
 
+from datetime import date, datetime
+
 from crewai.tools import tool
 from pydantic import BaseModel
 
@@ -72,12 +72,15 @@ from app.tools.flights import search_flights as _search_flights
 from app.tools.ground_transport import estimate_ground_transport as _estimate_ground_transport
 from app.tools.hotels import search_hotels as _search_hotels
 from app.tools.schemas import (
+    CabinClass,
     CarQuoteInput,
     CarRentalSearchInput,
+    ChildGuest,
     FlightSearchInput,
     GroundTransportEstimateInput,
     HotelSearchInput,
     ToolError,
+    TravelPurpose,
     VisaCheckInput,
     WeatherSearchInput,
 )
@@ -94,68 +97,178 @@ def _stringify(result: BaseModel) -> str:
 
 
 @tool("Search Flights")
-def search_flights_tool(query: FlightSearchInput) -> str:
+def search_flights_tool(
+    origin: str,
+    destination: str,
+    depart_date: date,
+    adults: int = 1,
+    return_date: date | None = None,
+    cabin_class: CabinClass = CabinClass.ECONOMY,
+    max_budget_usd: float | None = None,
+) -> str:
     """Search for bookable flight offers between two IATA airport codes.
     Returns offers sorted by price ascending as JSON, or an ERROR string
     starting with 'ERROR [' if the search failed — check for that prefix
     before treating the result as a successful offer list."""
-    return _stringify(_search_flights(FlightSearchInput.model_validate(query)))
+    query = FlightSearchInput(
+        origin=origin,
+        destination=destination,
+        depart_date=depart_date,
+        adults=adults,
+        return_date=return_date,
+        cabin_class=cabin_class,
+        max_budget_usd=max_budget_usd,
+    )
+    return _stringify(_search_flights(query))
 
 
 @tool("Get Weather Forecast")
-def get_weather_forecast_tool(query: WeatherSearchInput) -> str:
-    """Get a daily weather forecast for a city or explicit lat/lon. Only
-    covers roughly the next 15 days — an ERROR result for dates further
-    out means the forecast isn't available yet, not that the tool failed."""
-    return _stringify(_get_weather_forecast(WeatherSearchInput.model_validate(query)))
+def get_weather_forecast_tool(
+    start_date: date,
+    end_date: date,
+    city: str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+) -> str:
+    """Get a daily weather forecast for a city or explicit lat/lon (give
+    EITHER a city name OR both latitude and longitude, never both forms).
+    Only covers roughly the next 15 days — an ERROR result for dates
+    further out means the forecast isn't available yet, not that the tool
+    failed."""
+    query = WeatherSearchInput(
+        city=city,
+        latitude=latitude,
+        longitude=longitude,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return _stringify(_get_weather_forecast(query))
 
 
 @tool("Search Hotels")
-def search_hotels_tool(query: HotelSearchInput) -> str:
-    """Search for hotels near a city or lat/lon. IMPORTANT: the returned
-    price on each listing is Duffel's own ESTIMATE, not a guaranteed
-    bookable rate — always describe it to the traveler as an estimate."""
-    return _stringify(_search_hotels(HotelSearchInput.model_validate(query)))
+def search_hotels_tool(
+    check_in: date,
+    check_out: date,
+    city: str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    adults: int = 1,
+    child_ages: list[int] | None = None,
+    rooms: int = 1,
+    max_budget_usd_per_night: float | None = None,
+    radius_km: int = 5,
+) -> str:
+    """Search for hotels near a city or lat/lon (give EITHER a city name OR
+    both latitude and longitude, never both forms). child_ages is one age
+    (0-17) per child traveler, or omit/leave empty if there are no
+    children. IMPORTANT: the returned price on each listing is Duffel's own
+    ESTIMATE, not a guaranteed bookable rate — always describe it to the
+    traveler as an estimate."""
+    query = HotelSearchInput(
+        city=city,
+        latitude=latitude,
+        longitude=longitude,
+        check_in=check_in,
+        check_out=check_out,
+        adults=adults,
+        children=[ChildGuest(age=age) for age in (child_ages or [])],
+        rooms=rooms,
+        max_budget_usd_per_night=max_budget_usd_per_night,
+        radius_km=radius_km,
+    )
+    return _stringify(_search_hotels(query))
 
 
 @tool("Check Visa Requirements")
-def check_visa_requirements_tool(query: VisaCheckInput) -> str:
+def check_visa_requirements_tool(
+    passport_country: str,
+    destination_country: str,
+    purpose: TravelPurpose = TravelPurpose.TOURISM,
+) -> str:
     """Get an AI-generated, informational-only visa requirement estimate.
     This is NEVER authoritative — always relay the disclaimer field in the
     result to the traveler, and treat a null visa_required as 'unknown,
     check an official source', not as an error."""
-    return _stringify(_check_visa_requirements(VisaCheckInput.model_validate(query)))
+    query = VisaCheckInput(
+        passport_country=passport_country,
+        destination_country=destination_country,
+        purpose=purpose,
+    )
+    return _stringify(_check_visa_requirements(query))
 
 
 @tool("Estimate Ground Transport")
-def estimate_ground_transport_tool(query: GroundTransportEstimateInput) -> str:
+def estimate_ground_transport_tool(
+    origin_city: str | None = None,
+    origin_latitude: float | None = None,
+    origin_longitude: float | None = None,
+    destination_city: str | None = None,
+    destination_latitude: float | None = None,
+    destination_longitude: float | None = None,
+) -> str:
     """Get a rough, NON-BOOKABLE cost estimate for a ground-transport leg
-    (e.g. home to airport, or airport to hotel). There is no ride-hailing
-    API behind this — always relay the disclaimer field, and never present
-    the cost range as a fare quote."""
-    return _stringify(
-        _estimate_ground_transport(GroundTransportEstimateInput.model_validate(query))
+    (e.g. home to airport, or airport to hotel). For both origin and
+    destination, give EITHER a city/place name OR both latitude and
+    longitude, never both forms. There is no ride-hailing API behind this —
+    always relay the disclaimer field, and never present the cost range as
+    a fare quote."""
+    query = GroundTransportEstimateInput(
+        origin_city=origin_city,
+        origin_latitude=origin_latitude,
+        origin_longitude=origin_longitude,
+        destination_city=destination_city,
+        destination_latitude=destination_latitude,
+        destination_longitude=destination_longitude,
     )
+    return _stringify(_estimate_ground_transport(query))
 
 
 @tool("Search Car Rentals")
-def search_car_rentals_tool(query: CarRentalSearchInput) -> str:
+def search_car_rentals_tool(
+    pickup_at: datetime,
+    dropoff_at: datetime,
+    driver_age: int,
+    driver_country_code: str,
+    pickup_city: str | None = None,
+    pickup_latitude: float | None = None,
+    pickup_longitude: float | None = None,
+    dropoff_city: str | None = None,
+    dropoff_latitude: float | None = None,
+    dropoff_longitude: float | None = None,
+    radius_km: int = 5,
+) -> str:
     """Search for car rental rates for a pickup (and optional dropoff)
-    location and time window. Returns rates sorted by price ascending as
-    JSON, or an ERROR string. IMPORTANT: every rate's price is Duffel's own
-    ESTIMATE — always call Get Car Rental Quote on the chosen rate_id before
-    treating any price as firm."""
-    return _stringify(_search_car_rentals(CarRentalSearchInput.model_validate(query)))
+    location and time window. For pickup, and for dropoff if given, use
+    EITHER a city name OR both latitude and longitude, never both forms —
+    omit all three dropoff fields entirely for a same-location rental.
+    Returns rates sorted by price ascending as JSON, or an ERROR string.
+    IMPORTANT: every rate's price is Duffel's own ESTIMATE — always call
+    Get Car Rental Quote on the chosen rate_id before treating any price as
+    firm."""
+    query = CarRentalSearchInput(
+        pickup_city=pickup_city,
+        pickup_latitude=pickup_latitude,
+        pickup_longitude=pickup_longitude,
+        dropoff_city=dropoff_city,
+        dropoff_latitude=dropoff_latitude,
+        dropoff_longitude=dropoff_longitude,
+        pickup_at=pickup_at,
+        dropoff_at=dropoff_at,
+        radius_km=radius_km,
+        driver_age=driver_age,
+        driver_country_code=driver_country_code,
+    )
+    return _stringify(_search_car_rentals(query))
 
 
 @tool("Get Car Rental Quote")
-def get_car_rental_quote_tool(query: CarQuoteInput) -> str:
+def get_car_rental_quote_tool(rate_id: str) -> str:
     """Firm up a car rental rate's price before it can be proposed for
     booking. Takes the rate_id from a rate returned by Search Car Rentals.
     Duffel's quote price can differ from the original rate's price — use
     THIS tool's price, never the rate's own estimated_price_total_usd, once
     a specific rate has been chosen."""
-    return _stringify(_get_car_rental_quote(CarQuoteInput.model_validate(query)))
+    return _stringify(_get_car_rental_quote(CarQuoteInput(rate_id=rate_id)))
 
 
 ALL_RESEARCH_TOOLS = [

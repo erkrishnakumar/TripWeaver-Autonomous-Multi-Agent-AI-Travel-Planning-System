@@ -5,8 +5,17 @@ needed. Every case is a direct assertion on validate_budget()'s output.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from app.agents.budget import validate_budget
-from app.tools.schemas import CabinClass, FlightOffer, FlightSegment, HotelListing
+from app.tools.schemas import (
+    CabinClass,
+    CarRateOption,
+    CarRentalPaymentType,
+    FlightOffer,
+    FlightSegment,
+    HotelListing,
+)
 
 
 def _flight(price: float) -> FlightOffer:
@@ -37,6 +46,20 @@ def _hotel(price: float) -> HotelListing:
         longitude=1.0,
         estimated_price_total_usd=price,
         nights=3,
+    )
+
+
+def _car_rental(price: float) -> CarRateOption:
+    return CarRateOption(
+        rate_id="rat_1",
+        car_description="Compact - Toyota Corolla or similar",
+        supplier_name="Hertz",
+        payment_type=CarRentalPaymentType.PREPAID,
+        estimated_price_total_usd=price,
+        pickup_location_name="Atlanta",
+        dropoff_location_name="Atlanta",
+        pickup_at=datetime(2026, 9, 14, 10, 0),
+        dropoff_at=datetime(2026, 9, 17, 10, 0),
     )
 
 
@@ -73,3 +96,19 @@ class TestValidateBudget:
         assert result.flight_cost_usd == 400.0
         assert result.hotel_cost_usd == 0.0
         assert result.total_cost_usd == 400.0
+
+    def test_car_rental_cost_is_included_in_total(self):
+        result = validate_budget(1000.0, _flight(400.0), _hotel(300.0), _car_rental(150.0))
+        assert result.car_rental_cost_usd == 150.0
+        assert result.total_cost_usd == 850.0
+        assert result.within_budget is True
+
+    def test_car_rental_alone_can_push_over_budget(self):
+        result = validate_budget(500.0, _flight(400.0), None, _car_rental(150.0))
+        assert result.total_cost_usd == 550.0
+        assert result.within_budget is False
+        assert "over the" in result.message
+
+    def test_car_rental_defaults_to_zero_when_not_selected(self):
+        result = validate_budget(500.0, _flight(400.0), _hotel(0.0))
+        assert result.car_rental_cost_usd == 0.0

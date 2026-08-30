@@ -59,6 +59,9 @@ from app.tools.schemas import (
 )
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+# See the comment at its use site below (search_car_rentals()) for why this
+# exists -- shared with flights.py/hotels.py's identical caps.
+_MAX_RESULTS_RETURNED = 10
 _SEARCH_FIXTURES_PATH = Path(__file__).parent / "fixtures" / "car_rental_rates.json"
 
 _CARS_SEARCH_PATH = "/cars/search"
@@ -325,6 +328,10 @@ def search_car_rentals(query: CarRentalSearchInput) -> CarRentalSearchResult | T
         for r in rates_raw
     ]
     rates.sort(key=lambda r: r.estimated_price_total_usd)
+    # Cap what's handed back to the agent -- see hotels.py's search_hotels()
+    # for the full rationale (an uncapped result can, by itself, blow a
+    # hosted LLM's per-minute token budget). Already sorted cheapest first.
+    rates = rates[:_MAX_RESULTS_RETURNED]
 
     return CarRentalSearchResult(
         query=query,

@@ -19,26 +19,31 @@ flight/hotel match may still be worth showing the traveler.
 from __future__ import annotations
 
 from app.agents.schemas import BudgetCheckResult
-from app.tools.schemas import FlightOffer, HotelListing
+from app.tools.schemas import CarRateOption, FlightOffer, HotelListing
 
 
 def validate_budget(
     max_budget_usd: float | None,
     flight: FlightOffer | None,
     hotel: HotelListing | None,
+    car_rental: CarRateOption | None = None,
 ) -> BudgetCheckResult:
-    """Compare a selected flight offer + hotel listing against the trip's
-    max_budget_usd (Trip.max_budget_usd — None means no budget was set,
-    in which case everything is considered within budget by definition).
+    """Compare a selected flight offer + hotel listing + car rental rate
+    against the trip's max_budget_usd (Trip.max_budget_usd — None means no
+    budget was set, in which case everything is considered within budget by
+    definition).
 
-    hotel.estimated_price_total_usd is itself an ESTIMATE (see
-    HotelListing's own docstring in app/tools/schemas.py) — this function
-    doesn't add any further uncertainty on top of that, it just sums what
-    the tools already returned.
+    hotel.estimated_price_total_usd and car_rental.estimated_price_total_usd
+    are themselves ESTIMATES (see HotelListing's and CarRateOption's own
+    docstrings in app/tools/schemas.py) — this function doesn't add any
+    further uncertainty on top of that, it just sums what the tools already
+    returned. car_rental defaults to None since it's an optional part of a
+    trip, unlike flight/hotel.
     """
     flight_cost = flight.total_price_usd if flight is not None else 0.0
     hotel_cost = hotel.estimated_price_total_usd if hotel is not None else 0.0
-    total_cost = flight_cost + hotel_cost
+    car_rental_cost = car_rental.estimated_price_total_usd if car_rental is not None else 0.0
+    total_cost = flight_cost + hotel_cost + car_rental_cost
 
     if max_budget_usd is None:
         return BudgetCheckResult(
@@ -47,6 +52,7 @@ def validate_budget(
             max_budget_usd=None,
             flight_cost_usd=flight_cost,
             hotel_cost_usd=hotel_cost,
+            car_rental_cost_usd=car_rental_cost,
             message="No budget was set for this trip, so no budget check was applied.",
         )
 
@@ -69,5 +75,6 @@ def validate_budget(
         max_budget_usd=max_budget_usd,
         flight_cost_usd=flight_cost,
         hotel_cost_usd=hotel_cost,
+        car_rental_cost_usd=car_rental_cost,
         message=message,
     )
