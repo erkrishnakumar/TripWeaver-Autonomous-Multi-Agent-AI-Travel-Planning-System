@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import MetaData
+from sqlalchemy import DateTime, MetaData
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 NAMING_CONVENTION = {
@@ -30,10 +30,23 @@ class Base(DeclarativeBase):
 
 
 class TimestampMixin:
-    """Shared created_at/updated_at columns for every table that wants them."""
+    """Shared created_at/updated_at columns for every table that wants them.
 
-    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC), nullable=False)
+    DateTime(timezone=True) matters here, not just style: datetime.now(UTC)
+    produces a timezone-AWARE value, but a bare DateTime column maps to
+    Postgres' TIMESTAMP WITHOUT TIME ZONE. asyncpg strictly rejects binding
+    an aware datetime to a naive column (DataError: can't subtract offset-
+    naive and offset-aware datetimes) -- a real bug that stayed hidden
+    through every prior test because they all ran against permissive
+    in-memory SQLite, only surfacing on the first real write through the
+    full agent Flow against actual Postgres.
+    """
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
         nullable=False,

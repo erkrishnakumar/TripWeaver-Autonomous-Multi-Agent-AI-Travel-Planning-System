@@ -54,9 +54,9 @@ class AuditLog(Base):
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=False,
-        default=datetime.now(UTC),
+        default=lambda: datetime.now(UTC),
     )
 
     __table_args__ = (
