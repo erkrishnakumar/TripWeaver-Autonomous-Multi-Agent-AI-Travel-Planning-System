@@ -38,6 +38,13 @@ mcp = [
 api = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
+    # Password hashing for the auth foundation (app/auth/passwords.py) --
+    # used directly, not via passlib: passlib's bcrypt backend has had
+    # repeated compatibility breaks with newer bcrypt releases, and this
+    # project only needs hash/verify, not passlib's broader multi-algorithm
+    # abstraction. Ships its own py.typed marker, so no separate stub
+    # package is needed for mypy --strict.
+    "bcrypt>=4.1",
 ]
 
 dev = [

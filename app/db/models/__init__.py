@@ -13,6 +13,7 @@ from app.db.models.flight_option import FlightOption
 from app.db.models.hotel_option import HotelOption
 from app.db.models.itinerary import Itinerary
 from app.db.models.trip import Trip
+from app.db.models.user import User
 
 __all__ = [
     "Approval",
@@ -23,4 +24,5 @@ __all__ = [
     "HotelOption",
     "Itinerary",
     "Trip",
+    "User",
 ]
