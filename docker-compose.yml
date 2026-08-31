@@ -22,5 +22,24 @@ services:
 
     restart: unless-stopped
 
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: tripweaver-valkey
+
+    ports:
+      - "6380:6379"
+
+    volumes:
+      - tripweaver_valkey_data:/data
+
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+    restart: unless-stopped
+
 volumes:
   tripweaver_postgres_data:
+  tripweaver_valkey_data:

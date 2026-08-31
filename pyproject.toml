@@ -31,6 +31,13 @@ agents = [
 
 ]
 
+worker = [
+    # celery[redis] pulls in the `redis` Python client, which speaks the
+    # standard Redis wire protocol -- Valkey is protocol-compatible, so
+    # this same client talks to Valkey with no separate driver needed.
+    "celery[redis]>=5.4",
+]
+
 mcp = [
     "fastmcp>=0.3",
 ]

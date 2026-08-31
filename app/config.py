@@ -39,6 +39,16 @@ class Settings:
     # its own provider's quota independently.
     planner_llm_provider: str = os.environ.get("PLANNER_LLM_PROVIDER", "").lower()
 
+    # Celery broker (task queue) + result backend, both pointing at the
+    # same Valkey instance (docker-compose.yml's valkey service) -- see
+    # app/worker/celery_app.py for how these get used. Default matches the
+    # docker-compose port mapping (6380 on the host -> 6379 in the
+    # container), not Valkey/Redis's usual default port, to avoid
+    # colliding with any other Redis/Valkey instance already running
+    # locally on this machine.
+    celery_broker_url: str = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6380/0")
+    celery_result_backend: str = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6380/1")
+
     # Optional per-task-category overrides for the RESEARCH crew specifically
     # (flight/car/hotel/context/formatter each run as their own Agent -- see
     # crew.py's build_research_crew()). Each is empty by default, meaning
