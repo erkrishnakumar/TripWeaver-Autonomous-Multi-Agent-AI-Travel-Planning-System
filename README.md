@@ -23,9 +23,10 @@ tripweaver/
 │   └── config.py          # Centralized settings (env vars) — see Local setup below
 ├── alembic/              # Alembic migration environment + versions
 ├── docs/                 # Design docs, roadmap, incident writeups (see Documentation below)
-├── tests/                # Unit + integration tests (162 passing), including
+├── tests/                # Unit + integration tests (173 passing), including
 │                         #   test_agent_evals.py — Phase 7 regression evals for
-│                         #   real LLM/provider failure modes (see Status below)
+│                         #   real LLM/provider failure modes, and test_auth.py —
+│                         #   the auth foundation (see Status below)
 ├── .github/workflows/    # CI pipeline (ruff, mypy, pytest)
 ├── .pre-commit-config.yaml  # Local pre-commit hooks (ruff check --fix + ruff format)
 └── docker-compose.yml    # Local Postgres for Phase 5+
@@ -146,10 +147,10 @@ a real mypy/CI incident and fix.
 - [x] Phase 2.1: ground transport cost estimation
 - [x] Phase 3: CrewAI agents + Flow with human-approval gate
 - [ ] Phase 4: real confirm/reject API endpoint (propose_booking() itself is done; see Phase 8)
-- [x] Phase 5: Postgres persistence — models done and tested; real Postgres round-trip not yet verified
+- [x] Phase 5: Postgres persistence — models done and tested; real Postgres round-trip verified live (2026-08-30)
 - [ ] Phase 6: observability
 - [x] Phase 7 (v1): agent evals — `tests/test_agent_evals.py` encodes real observed LLM/provider failure modes (hallucinated/placeholder ids, empty-dict "nothing found", provider rate-limit crashes, missing-input hotel search) as deterministic regression tests. **Still open**: live-LLM-output-quality evals against a real/recorded provider — see `docs/TripWeaver_Roadmap.md`
-- [ ] Phase 8: API layer
+- [ ] Phase 8: API layer — auth foundation started ahead of this phase: `User` model, bcrypt password hashing, nullable `Trip.user_id` FK — see `docs/Auth_Requirement.md`. Login endpoint, session/token issuance, and auth middleware are still open, and are properly Phase 8 work
 - [ ] Phase 9: deployment
 
 See `docs/TripWeaver_Roadmap.md` for the full breakdown, including known open items.

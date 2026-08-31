@@ -48,6 +48,7 @@ own, since it just persists whatever object it's handed.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any, cast
 
 from crewai.flow.flow import Flow, listen, start
@@ -577,6 +578,28 @@ def run_trip_planning_flow(
     return cast(TripPlanningState, flow.state)
 
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+class _AnsiStrippingWriter:
+    """Wraps a writable stream and strips ANSI escape codes before writing.
+    Rich writes raw color/style codes to whatever stream it's given -- a
+    real terminal renders those as color, but a plain text file just stores
+    them literally (e.g. '[34m', '[0m'), making the saved log file far
+    harder to read than the live terminal output it's meant to preserve.
+    Used to wrap ONLY the log-file stream passed to _TeeStream below, never
+    the real terminal stream, so you keep colors on screen."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def write(self, data: str) -> None:
+        self._stream.write(_ANSI_ESCAPE_RE.sub("", data))
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+
 class _TeeStream:
     """Mirrors every write to N underlying streams (e.g. the real console
     AND a log file) so a run's full output is both visible live and saved
@@ -630,8 +653,8 @@ if __name__ == "__main__":
     logs_dir.mkdir(exist_ok=True)
     log_path = logs_dir / f"flow_run_{datetime.now():%Y%m%d_%H%M%S}.log"
     log_file = open(log_path, "w", encoding="utf-8", errors="replace")
-    sys.stdout = _TeeStream(sys.stdout, log_file)
-    sys.stderr = _TeeStream(sys.stderr, log_file)
+    sys.stdout = _TeeStream(sys.stdout, _AnsiStrippingWriter(log_file))
+    sys.stderr = _TeeStream(sys.stderr, _AnsiStrippingWriter(log_file))
     print(f"Logging full output to {log_path}")
 
     final_state = run_trip_planning_flow(
