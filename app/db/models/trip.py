@@ -10,7 +10,7 @@ import uuid
 from datetime import date
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, Enum, Float, ForeignKey, Index, String, Text, Uuid
+from sqlalchemy import Boolean, Date, Enum, Float, ForeignKey, Index, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -81,6 +81,20 @@ class Trip(Base, TimestampMixin):
     max_budget_usd: Mapped[float | None] = mapped_column(
         Float,
         nullable=True,
+    )
+
+    # Persisted so a Celery task given only a trip_id (not the full
+    # original request) can still tell the researcher whether a car
+    # rental was requested -- research()/plan() need this, unlike
+    # driver_*/sandbox-test fields, which are ONLY used later by
+    # propose_bookings() and deliberately stay out of this model (driver
+    # PII especially -- see DriverDetails' own docstring in
+    # app/tools/schemas.py for why that's more sensitive than anything
+    # else this model stores).
+    wants_car_rental: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
     )
 
     status: Mapped[TripStatus] = mapped_column(

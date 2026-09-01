@@ -250,9 +250,32 @@ class TripPlanningFlow(Flow[TripPlanningState]):
                     adults=self.state.adults,
                     max_budget_usd=self.state.max_budget_usd,
                     requester_email=self.state.requester_email,
+                    wants_car_rental=self.state.wants_car_rental,
                 )
                 await session.commit()
                 self.state.trip_id = str(trip.id)
+                trip_row: Trip | None = trip
+            else:
+                # trip_id was pre-supplied (the Celery/API path) -- load the
+                # canonical request fields from the DB row instead of
+                # requiring the caller to re-pass everything that was
+                # already persisted when the trip was created. driver_*/
+                # sandbox-test fields are NOT loaded here -- they're only
+                # used later by propose_bookings(), never by research()/
+                # plan(), and deliberately don't live on the Trip row (see
+                # Trip.wants_car_rental's own comment).
+                trip_row = await session.get(Trip, uuid.UUID(self.state.trip_id))
+                if trip_row is not None:
+                    self.state.origin_iata = trip_row.origin_iata
+                    self.state.destination_iata = trip_row.destination_iata
+                    self.state.depart_date = trip_row.depart_date.isoformat()
+                    self.state.return_date = (
+                        trip_row.return_date.isoformat() if trip_row.return_date else None
+                    )
+                    self.state.adults = trip_row.adults
+                    self.state.max_budget_usd = trip_row.max_budget_usd
+                    self.state.requester_email = trip_row.requester_email
+                    self.state.wants_car_rental = trip_row.wants_car_rental
 
             existing = await get_last_completed_payload(session, self.state.trip_id, "research")
             if existing is not None:
@@ -260,7 +283,6 @@ class TripPlanningFlow(Flow[TripPlanningState]):
                 self.state.research_output = research_output
                 return research_output
 
-            trip_row = await session.get(Trip, uuid.UUID(self.state.trip_id))
             if trip_row is not None:
                 trip_row.status = TripStatus.RESEARCHING
             await log_stage_event(session, self.state.trip_id, "research_started")
