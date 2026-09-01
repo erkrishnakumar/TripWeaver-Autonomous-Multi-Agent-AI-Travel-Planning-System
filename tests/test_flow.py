@@ -180,6 +180,23 @@ def _kickoff_args() -> dict:
     }
 
 
+async def _kickoff_and_approve(flow: flow_module.TripPlanningFlow, inputs: dict) -> None:
+    """Runs kickoff() (research -> check_budget -> plan ->
+    mark_awaiting_approval), then manually chains the two steps that used
+    to auto-run via @listen before flow.py's Celery-resumability redesign
+    removed them from the automated chain -- a worker has no terminal to
+    block on input() with, so real approval now comes from a separate HTTP
+    call, not from kickoff() completing. Mirrors exactly what
+    run_trip_planning_flow()'s CLI entrypoint now does manually. Skips the
+    continuation if research/plan already failed, matching that same
+    entrypoint's guard -- there's nothing to approve if the plan itself
+    couldn't be produced."""
+    flow.kickoff(inputs=inputs)
+    if flow.state.error is None:
+        approved = flow.wait_for_human_approval(flow.state.trip_id)
+        await flow.propose_bookings(approved)
+
+
 class TestTripPlanningFlowApproved:
     async def test_approved_flow_creates_trip_and_proposes_both_bookings(
         self, monkeypatch, sqlite_session_override
@@ -200,7 +217,7 @@ class TestTripPlanningFlowApproved:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs=_kickoff_args())
+        await _kickoff_and_approve(flow, _kickoff_args())
         state = flow.state
 
         assert state.approved is True
@@ -223,7 +240,7 @@ class TestTripPlanningFlowApproved:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs=_kickoff_args())
+        await _kickoff_and_approve(flow, _kickoff_args())
 
         session_factory = sqlite_session_override
         async with session_factory() as session:
@@ -248,7 +265,7 @@ class TestTripPlanningFlowRejected:
         monkeypatch.setattr("builtins.input", lambda _: "n")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs=_kickoff_args())
+        await _kickoff_and_approve(flow, _kickoff_args())
         state = flow.state
 
         assert state.approved is False
@@ -271,7 +288,7 @@ class TestTripPlanningFlowRejected:
         monkeypatch.setattr("builtins.input", lambda _: "")  # just pressing enter
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs=_kickoff_args())
+        await _kickoff_and_approve(flow, _kickoff_args())
 
         assert flow.state.approved is False
 
@@ -287,7 +304,7 @@ class TestTripPlanningFlowPartialSelection:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs=_kickoff_args())
+        await _kickoff_and_approve(flow, _kickoff_args())
         state = flow.state
 
         assert state.flight_booking is not None
@@ -324,7 +341,7 @@ class TestTripPlanningFlowCarRental:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs={**_kickoff_args(), **_driver_kwargs()})
+        await _kickoff_and_approve(flow, {**_kickoff_args(), **_driver_kwargs()})
         state = flow.state
 
         assert state.car_rental_booking is not None
@@ -346,7 +363,7 @@ class TestTripPlanningFlowCarRental:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs=_kickoff_args())  # no driver_* kwargs
+        await _kickoff_and_approve(flow, _kickoff_args())  # no driver_* kwargs
         state = flow.state
 
         assert state.car_rental_booking is None
@@ -372,7 +389,7 @@ class TestTripPlanningFlowCarRental:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs={**_kickoff_args(), **_driver_kwargs()})
+        await _kickoff_and_approve(flow, {**_kickoff_args(), **_driver_kwargs()})
         state = flow.state
 
         assert state.car_rental_booking is None
@@ -388,7 +405,7 @@ class TestTripPlanningFlowCarRental:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs=_kickoff_args())
+        await _kickoff_and_approve(flow, _kickoff_args())
         state = flow.state
 
         assert state.flight_booking is None
@@ -426,7 +443,7 @@ class TestHallucinationGuard:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs=_kickoff_args())
+        await _kickoff_and_approve(flow, _kickoff_args())
         state = flow.state
 
         assert state.flight_booking is None
@@ -457,7 +474,7 @@ class TestHallucinationGuard:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs=_kickoff_args())
+        await _kickoff_and_approve(flow, _kickoff_args())
         state = flow.state
 
         assert state.hotel_booking is None
@@ -484,7 +501,7 @@ class TestHallucinationGuard:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs=_kickoff_args())
+        await _kickoff_and_approve(flow, _kickoff_args())
 
         session_factory = sqlite_session_override
         async with session_factory() as session:

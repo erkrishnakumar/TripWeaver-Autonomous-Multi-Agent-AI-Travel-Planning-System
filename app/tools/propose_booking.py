@@ -73,16 +73,14 @@ async def _write_audit_log(
     event_type: str,
     payload: dict[str, Any],
 ) -> None:
-    from app.db.models import AuditLog
+    from app.tools.audit import log_stage_event
 
-    session.add(
-        AuditLog(
-            id=uuid.uuid4(),
-            trip_id=trip_id,
-            booking_id=booking_id,
-            event_type=event_type,
-            payload=payload,
-        )
+    await log_stage_event(
+        session,
+        str(trip_id),
+        event_type,
+        payload=payload,
+        booking_id=str(booking_id),
     )
 
 

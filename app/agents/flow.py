@@ -48,7 +48,10 @@ own, since it just persists whatever object it's handed.
 
 from __future__ import annotations
 
+import asyncio
 import re
+import uuid
+from datetime import date as date_cls
 from typing import TYPE_CHECKING, Any, cast
 
 from crewai.flow.flow import Flow, listen, start
@@ -57,7 +60,10 @@ from pydantic import BaseModel, ValidationError
 from app.agents.budget import validate_budget
 from app.agents.crew import build_planning_crew, build_research_crew
 from app.agents.schemas import BudgetCheckResult, PlanOutput, ResearchOutput
+from app.db.models import Trip
+from app.db.models.enums import TripStatus
 from app.db.session import get_session
+from app.tools.audit import get_last_completed_payload, log_stage_event
 from app.tools.car_rentals import get_car_rental_quote
 from app.tools.create_trip import create_trip
 from app.tools.flights import get_flight_offer
@@ -218,51 +224,86 @@ class TripPlanningFlow(Flow[TripPlanningState]):
 
     @start()
     async def research(self) -> ResearchOutput:
-        """Kick off the research Crew. Runs the researcher Agent, which
-        calls the read-only tools in app/agents/tools.py — no DB, no
-        booking, nothing that needs human approval yet.
+        """Kick off the research Crew -- now resumability-aware: if this
+        trip already has a completed research stage logged (a prior
+        attempt got this far before failing later), skip straight to
+        using that instead of re-running the crew and burning LLM calls
+        again. See app/agents/audit.py for the full rationale.
 
-        Wrapped in try/except because Task._export_output() (inside
-        crew.kickoff_async(), entirely outside our code) can raise a raw
-        pydantic ValidationError if the LLM's structured output is
-        malformed (e.g. an explicit null for a required field like
-        CarRateOption.dropoff_at) — verified live: a real run produced
-        exactly this. Without this guard, one bad LLM response crashes the
-        entire Flow with a raw traceback instead of degrading gracefully,
-        which this project's own "fail honestly, don't fake reliability"
-        principle argues against doing silently, but also argues against
-        letting crash the whole process for what is, from the user's
-        perspective, just an under-populated research result.
+        Also auto-creates the Trip row if trip_id wasn't already provided
+        by the caller -- preserves the old persist_draft_trip() behavior
+        for the CLI demo entrypoint, while letting a future Celery/API
+        caller pass an existing trip_id instead (skipping creation,
+        enabling resume)."""
+        async with get_session() as session:
+            if not self.state.trip_id:
+                trip = await create_trip(
+                    session,
+                    origin_iata=self.state.origin_iata,
+                    destination_iata=self.state.destination_iata,
+                    depart_date=date_cls.fromisoformat(self.state.depart_date),
+                    return_date=(
+                        date_cls.fromisoformat(self.state.return_date)
+                        if self.state.return_date
+                        else None
+                    ),
+                    adults=self.state.adults,
+                    max_budget_usd=self.state.max_budget_usd,
+                    requester_email=self.state.requester_email,
+                )
+                await session.commit()
+                self.state.trip_id = str(trip.id)
 
-        ALSO catches bare Exception (not just ValidationError/AssertionError)
-        — verified live: a provider rate limit (e.g. Gemini's free-tier
-        RESOURCE_EXHAUSTED, or Groq's tokens-per-minute cap) raises a raw
-        provider client error from deep inside crew.kickoff_async(), which
-        is exactly the same "one bad LLM call crashes the whole Flow"
-        failure this guard already exists to prevent for malformed output —
-        a transient quota/rate-limit error is not meaningfully different
-        from a malformed response for this purpose, so it gets the same
-        graceful-degradation treatment rather than its own special case."""
+            existing = await get_last_completed_payload(session, self.state.trip_id, "research")
+            if existing is not None:
+                research_output = ResearchOutput.model_validate(existing)
+                self.state.research_output = research_output
+                return research_output
+
+            trip_row = await session.get(Trip, uuid.UUID(self.state.trip_id))
+            if trip_row is not None:
+                trip_row.status = TripStatus.RESEARCHING
+            await log_stage_event(session, self.state.trip_id, "research_started")
+            await session.commit()
+
         crew = build_research_crew(
             self._trip_request_summary(),
             car_rental_override=self._car_rental_sandbox_override_note(),
         )
         try:
             crew_output = cast("CrewOutput", await crew.kickoff_async())
-            research_output = crew_output.pydantic
+            research_output = cast(ResearchOutput, crew_output.pydantic)
             assert isinstance(research_output, ResearchOutput)
         except (ValidationError, AssertionError) as e:
             self.state.error = f"Research step produced malformed output: {e}"
             research_output = ResearchOutput()
-        except Exception as e:  # noqa: BLE001 -- see docstring above
+        except Exception as e:  # noqa: BLE001 -- provider rate limits etc., see below
             self.state.error = f"Research step failed: {e}"
             research_output = ResearchOutput()
+
+        async with get_session() as session:
+            if self.state.error:
+                await log_stage_event(
+                    session,
+                    self.state.trip_id,
+                    "research_failed",
+                    payload={"error": self.state.error},
+                )
+            else:
+                await log_stage_event(
+                    session,
+                    self.state.trip_id,
+                    "research_completed",
+                    payload=research_output.model_dump(mode="json"),
+                )
+            await session.commit()
+
         self.state.research_output = research_output
         return research_output
 
     @listen(research)
-    def check_budget(self, research_output: ResearchOutput) -> BudgetCheckResult:
-        """Plain Python, no LLM — see app/agents/budget.py for why."""
+    async def check_budget(self, research_output: ResearchOutput) -> BudgetCheckResult:
+        """Plain Python, no LLM -- see app/agents/budget.py for why."""
         budget_check = validate_budget(
             max_budget_usd=self.state.max_budget_usd,
             flight=research_output.selected_flight,
@@ -270,16 +311,33 @@ class TripPlanningFlow(Flow[TripPlanningState]):
             car_rental=research_output.selected_car_rental,
         )
         self.state.budget_check = budget_check
+        async with get_session() as session:
+            await log_stage_event(
+                session,
+                self.state.trip_id,
+                "budget_checked",
+                payload=budget_check.model_dump(mode="json"),
+            )
+            await session.commit()
         return budget_check
 
     @listen(check_budget)
     async def plan(self, budget_check: BudgetCheckResult) -> PlanOutput:
-        """Kick off the planning Crew with the research + budget results.
+        """Same resumability pattern as research() -- see that method's
+        docstring."""
+        async with get_session() as session:
+            existing = await get_last_completed_payload(session, self.state.trip_id, "plan")
+            if existing is not None:
+                plan_output = PlanOutput.model_validate(existing)
+                self.state.plan = plan_output
+                return plan_output
 
-        Same malformed-output guard as research() — see that method's
-        docstring for why this can't just let the exception propagate, and
-        why a bare Exception (e.g. a provider rate limit) is caught here too,
-        not just ValidationError/AssertionError."""
+            trip_row = await session.get(Trip, uuid.UUID(self.state.trip_id))
+            if trip_row is not None:
+                trip_row.status = TripStatus.PLANNING
+            await log_stage_event(session, self.state.trip_id, "plan_started")
+            await session.commit()
+
         crew = build_planning_crew(
             self._trip_request_summary(),
             self.state.research_output,
@@ -287,46 +345,52 @@ class TripPlanningFlow(Flow[TripPlanningState]):
         )
         try:
             crew_output = cast("CrewOutput", await crew.kickoff_async())
-            plan_output = crew_output.pydantic
+            plan_output = cast(PlanOutput, crew_output.pydantic)
             assert isinstance(plan_output, PlanOutput)
         except (ValidationError, AssertionError) as e:
             self._add_error(f"Planning step produced malformed output: {e}")
             plan_output = PlanOutput(itinerary_summary="(plan could not be generated)")
-        except Exception as e:  # noqa: BLE001 -- see research()'s docstring
+        except Exception as e:  # noqa: BLE001
             self._add_error(f"Planning step failed: {e}")
             plan_output = PlanOutput(itinerary_summary="(plan could not be generated)")
+
+        async with get_session() as session:
+            if self.state.error:
+                await log_stage_event(
+                    session, self.state.trip_id, "plan_failed", payload={"error": self.state.error}
+                )
+            else:
+                await log_stage_event(
+                    session,
+                    self.state.trip_id,
+                    "plan_completed",
+                    payload=plan_output.model_dump(mode="json"),
+                )
+            await session.commit()
+
         self.state.plan = plan_output
         return plan_output
 
     @listen(plan)
-    async def persist_draft_trip(self, plan_output: PlanOutput) -> str:
-        """Plain Python DB write — creates the Trip row in DRAFT status so
-        there's a trip_id to attach proposed bookings to later. No agent
-        involvement; see module docstring."""
-        from datetime import date as date_cls
-
+    async def mark_awaiting_approval(self, plan_output: PlanOutput) -> str:
+        """Automated chain stops HERE. Deliberately does NOT auto-call
+        wait_for_human_approval()/propose_bookings() anymore -- a Celery
+        worker has no terminal to block on input() with, and a real
+        approval has to come from an HTTP call to a separate endpoint,
+        not from this Flow completing. Sets the trip's final pre-approval
+        status: AWAITING_APPROVAL if research+plan both genuinely
+        succeeded, FAILED if either one degraded (see research()/plan()'s
+        error handling) -- there's nothing meaningful to approve if the
+        plan itself couldn't be produced."""
         async with get_session() as session:
-            trip = await create_trip(
-                session,
-                origin_iata=self.state.origin_iata,
-                destination_iata=self.state.destination_iata,
-                depart_date=date_cls.fromisoformat(self.state.depart_date),
-                return_date=(
-                    date_cls.fromisoformat(self.state.return_date)
-                    if self.state.return_date
-                    else None
-                ),
-                adults=self.state.adults,
-                max_budget_usd=self.state.max_budget_usd,
-                requester_email=self.state.requester_email,
-            )
+            trip_row = await session.get(Trip, uuid.UUID(self.state.trip_id))
+            if trip_row is not None:
+                trip_row.status = (
+                    TripStatus.FAILED if self.state.error else TripStatus.AWAITING_APPROVAL
+                )
             await session.commit()
-            trip_id = str(trip.id)
+        return cast(str, self.state.trip_id)
 
-        self.state.trip_id = trip_id
-        return trip_id
-
-    @listen(persist_draft_trip)
     def wait_for_human_approval(self, trip_id: str) -> bool:
         """*** PHASE 8 PLACEHOLDER — SEE MODULE DOCSTRING ***
 
@@ -368,7 +432,6 @@ class TripPlanningFlow(Flow[TripPlanningState]):
         drop a real failure from the final state."""
         self.state.error = f"{self.state.error} {message}" if self.state.error else message
 
-    @listen(wait_for_human_approval)
     async def propose_bookings(self, approved: bool) -> None:
         """Only reachable after an explicit human 'y'. Writes
         PENDING_APPROVAL rows via propose_booking() — still NEVER a real
@@ -575,6 +638,11 @@ def run_trip_planning_flow(
             "driver_phone_number": driver_phone_number,
         }
     )
+
+    if flow.state.error is None:
+        approved = flow.wait_for_human_approval(flow.state.trip_id)
+        asyncio.run(flow.propose_bookings(approved))
+
     return cast(TripPlanningState, flow.state)
 
 

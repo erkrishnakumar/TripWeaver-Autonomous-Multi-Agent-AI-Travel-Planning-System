@@ -142,6 +142,21 @@ def _kickoff_args() -> dict:
     }
 
 
+async def _kickoff_and_approve(flow: flow_module.TripPlanningFlow, inputs: dict) -> None:
+    """Runs kickoff() (research -> check_budget -> plan ->
+    mark_awaiting_approval), then manually chains the two steps that used
+    to auto-run via @listen before flow.py's Celery-resumability redesign
+    removed them from the automated chain -- a worker has no terminal to
+    block on input() with, so real approval now comes from a separate HTTP
+    call, not from kickoff() completing. Skips the continuation if
+    research/plan already failed, matching run_trip_planning_flow()'s CLI
+    entrypoint's own guard."""
+    flow.kickoff(inputs=inputs)
+    if flow.state.error is None:
+        approved = flow.wait_for_human_approval(flow.state.trip_id)
+        await flow.propose_bookings(approved)
+
+
 @pytest_asyncio.fixture
 async def sqlite_session_override(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
@@ -311,7 +326,7 @@ class TestHallucinationGuardCarRental:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs={**_kickoff_args(), **_driver_kwargs()})
+        await _kickoff_and_approve(flow, {**_kickoff_args(), **_driver_kwargs()})
         state = flow.state
 
         assert state.car_rental_booking is None
@@ -348,7 +363,7 @@ class TestHallucinationGuardCarRental:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
-        flow.kickoff(inputs={**_kickoff_args(), **_driver_kwargs()})
+        await _kickoff_and_approve(flow, {**_kickoff_args(), **_driver_kwargs()})
 
         assert flow.state.car_rental_booking is None
         assert flow.state.error is not None

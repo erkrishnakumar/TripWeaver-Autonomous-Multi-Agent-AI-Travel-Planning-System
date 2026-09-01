@@ -10,10 +10,10 @@ from datetime import date
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.agents.audit import get_last_completed_payload, log_stage_event
 from app.db.base import Base
 from app.db.models import Trip
 from app.db.models.enums import TripStatus
+from app.tools.audit import get_last_completed_payload, log_stage_event
 
 
 @pytest_asyncio.fixture

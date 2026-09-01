@@ -29,9 +29,14 @@ async def log_stage_event(
     trip_id: str,
     event_type: str,
     payload: dict[str, Any] | None = None,
+    booking_id: str | None = None,
 ) -> None:
     """Writes one AuditLog row and flushes -- does not commit; the caller
     controls the transaction boundary, same convention as create_trip().
+    The ONE place any AuditLog row gets written anywhere in this codebase
+    -- app/tools/propose_booking.py uses this too, not a separate
+    AuditLog(...) construction, so the sequence logic can't drift or be
+    forgotten in a second place.
 
     sequence is computed here in plain Python arithmetic, not left to a
     DB/clock-based default -- verified live that BOTH created_at
@@ -51,6 +56,7 @@ async def log_stage_event(
     session.add(
         AuditLog(
             trip_id=uuid.UUID(trip_id),
+            booking_id=uuid.UUID(booking_id) if booking_id else None,
             event_type=event_type,
             payload=payload or {},
             sequence=next_sequence,
