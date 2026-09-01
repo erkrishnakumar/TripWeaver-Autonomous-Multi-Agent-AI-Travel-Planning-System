@@ -25,3 +25,6 @@ docs/
 docs/_build/
 .docs/
 .docs*
+
+
+alembic.txt
