@@ -27,3 +27,20 @@ class TripRead(BaseModel):
     status: TripStatus
     created_at: datetime
     updated_at: datetime
+
+
+class TripCreate(BaseModel):
+    origin_iata: str
+    destination_iata: str
+    depart_date: date
+    return_date: date | None = None
+    adults: int = 1
+    max_budget_usd: float | None = None
+    requester_email: str | None = None
+    wants_car_rental: bool = False
+
+
+class TripProceedResponse(BaseModel):
+    trip_id: uuid.UUID
+    status: str
+    message: str

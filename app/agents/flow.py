@@ -50,8 +50,13 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sys
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date as date_cls
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from crewai.flow.flow import Flow, listen, start
@@ -713,10 +718,46 @@ class _TeeStream:
         return getattr(self._streams[0], name)
 
 
+@contextmanager
+def capture_output_to_log_file(label: str) -> Iterator[Path]:
+    """Redirects stdout/stderr to BOTH the real stream and a timestamped
+    log file under logs/ (ANSI codes stripped from the file copy only --
+    see _AnsiStrippingWriter), restoring the originals on exit. Shared by
+    the CLI entrypoint below AND run_trip_planning() (the Celery task) --
+    without this, a worker-driven run's Rich output only ever appears in
+    the worker process's own console, never saved anywhere (verified
+    live: exactly why Celery-driven runs weren't landing in logs/ the way
+    CLI runs always have)."""
+    # getattr(..., None), not sys.stdout.encoding directly -- Celery
+    # workers wrap stdout/stderr in their own logging proxy (routes
+    # print() through Celery's logging system), and that proxy has no
+    # .encoding attribute at all (verified live: a real worker crash,
+    # AttributeError: 'LoggingProxy' object has no attribute 'encoding').
+    # If we can't even tell the current encoding, don't attempt to
+    # reconfigure it -- this whole UTF-8 fix is only relevant for a real
+    # console anyway.
+    stdout_encoding = getattr(sys.stdout, "encoding", None)
+    if stdout_encoding and stdout_encoding.lower() != "utf-8":
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+
+    logs_dir = Path(__file__).resolve().parent.parent.parent / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    log_path = logs_dir / f"{label}_{datetime.now():%Y%m%d_%H%M%S}.log"
+    log_file = open(log_path, "w", encoding="utf-8", errors="replace")
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    sys.stdout = _TeeStream(orig_stdout, _AnsiStrippingWriter(log_file))
+    sys.stderr = _TeeStream(orig_stderr, _AnsiStrippingWriter(log_file))
+    print(f"Logging full output to {log_path}")
+    try:
+        yield log_path
+    finally:
+        sys.stdout, sys.stderr = orig_stdout, orig_stderr
+        log_file.close()
+
+
 if __name__ == "__main__":
-    import sys
-    from datetime import date, datetime, timedelta
-    from pathlib import Path
+    from datetime import date, timedelta
 
     # Windows' default console codepage (cp1252) can't encode the emoji in
     # CrewAI's Rich-based progress panels -- verified live: running this

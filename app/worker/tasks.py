@@ -1,10 +1,12 @@
 """
 Celery tasks. ping() is a trivial pipeline-verification task (see its own
-docstring). run_trip_planning() is the real one -- wraps TripPlanningFlow's
-resumable research->plan chain (app/agents/flow.py) so it can run as a
-background job instead of blocking an HTTP request for however long a
-multi-provider LLM pipeline takes (see docs/TripWeaver_Roadmap.md's Phase 8
-notes for why this can't just be a synchronous endpoint).
+docstring). run_trip_planning() wraps TripPlanningFlow's resumable
+research->plan chain (app/agents/flow.py) so it can run as a background
+job instead of blocking an HTTP request for however long a multi-provider
+LLM pipeline takes. propose_trip_bookings() is Gate 1's actual work,
+triggered by POST /trips/{id}/proceed -- see docs/TripWeaver_Roadmap.md's
+Phase 8 notes for why both of these need to be background jobs rather
+than synchronous endpoints.
 """
 
 from __future__ import annotations
@@ -16,7 +18,8 @@ from typing import Any
 from celery import Task
 
 from app.agents.flow import TripPlanningFlow
-from app.tools.audit import log_stage_event
+from app.agents.schemas import ResearchOutput
+from app.tools.audit import get_last_completed_payload, log_stage_event
 from app.worker.celery_app import celery_app
 
 
@@ -101,8 +104,108 @@ def run_trip_planning(self: Task[Any, Any], trip_id: str) -> str:
     already manages its own event loop internally (verified: it calls
     asyncio.run() itself under the hood), so this can call it directly
     without an extra asyncio.run() wrapper here."""
+    from app.agents.flow import capture_output_to_log_file
+
     flow = TripPlanningFlow()
-    flow.kickoff(inputs={"trip_id": trip_id})
+    with capture_output_to_log_file(f"trip_{trip_id}"):
+        flow.kickoff(inputs={"trip_id": trip_id})
     if flow.state.error:
         raise RuntimeError(flow.state.error)
+    return trip_id
+
+
+async def _load_flow_state_for_proposal(trip_id: str) -> TripPlanningFlow:
+    """Reconstructs a TripPlanningFlow's state for a trip that already
+    completed research+plan in a PREVIOUS Celery task (run_trip_planning)
+    -- that task's in-memory Flow object is long gone by the time a human
+    approves via POST /trips/{id}/proceed, so this rebuilds just enough
+    state for propose_bookings() to run: the trip's own fields (from the
+    Trip row, same fields research() already knows how to load) and its
+    completed research output (from AuditLog's research_completed
+    payload -- the same one research()'s resumability check reads)."""
+    from app.db.models import Trip
+    from app.db.session import get_session
+
+    flow = TripPlanningFlow()
+    flow.state.trip_id = trip_id
+    async with get_session() as session:
+        trip_row = await session.get(Trip, uuid.UUID(trip_id))
+        if trip_row is None:
+            raise ValueError(f"Trip {trip_id} not found")
+        flow.state.origin_iata = trip_row.origin_iata
+        flow.state.destination_iata = trip_row.destination_iata
+        flow.state.depart_date = trip_row.depart_date.isoformat()
+        flow.state.return_date = trip_row.return_date.isoformat() if trip_row.return_date else None
+        flow.state.adults = trip_row.adults
+        flow.state.max_budget_usd = trip_row.max_budget_usd
+        flow.state.requester_email = trip_row.requester_email
+        flow.state.wants_car_rental = trip_row.wants_car_rental
+
+        research_payload = await get_last_completed_payload(session, trip_id, "research")
+        if research_payload is None:
+            raise ValueError(f"Trip {trip_id} has no completed research to propose bookings from")
+        flow.state.research_output = ResearchOutput.model_validate(research_payload)
+
+    return flow
+
+
+class NoBookingsProposedError(RuntimeError):
+    """Raised when nothing could be proposed for genuine business reasons
+    (expired offers, missing driver details) -- NOT a transient failure.
+    Retrying won't help: propose_bookings() re-verifies the SAME already-
+    researched offer/rate ids every time, it never re-runs research to
+    fetch fresh ones, so an expired offer stays expired no matter how many
+    times this retries. Excluded from autoretry via dont_autoretry_for on
+    the task below, so this fails fast instead of burning 3 pointless
+    retries against data that will never become valid again."""
+
+
+async def _propose_bookings_for_trip(trip_id: str) -> None:
+    from app.db.models import Trip
+    from app.db.models.enums import TripStatus
+    from app.db.session import get_session
+
+    flow = await _load_flow_state_for_proposal(trip_id)
+    await flow.propose_bookings(approved=True)
+
+    nothing_proposed = (
+        flow.state.flight_booking is None
+        and flow.state.hotel_booking is None
+        and flow.state.car_rental_booking is None
+    )
+    async with get_session() as session:
+        trip_row = await session.get(Trip, uuid.UUID(trip_id))
+        if trip_row is not None:
+            trip_row.status = TripStatus.FAILED if nothing_proposed else TripStatus.APPROVED
+        await session.commit()
+
+    if nothing_proposed:
+        raise NoBookingsProposedError(flow.state.error or "No bookings were proposed.")
+
+
+@celery_app.task(
+    name="propose_trip_bookings",
+    bind=True,
+    autoretry_for=(Exception,),
+    dont_autoretry_for=(NoBookingsProposedError,),
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=3,
+)
+def propose_trip_bookings(self: Task[Any, Any], trip_id: str) -> str:
+    """Gate 1's actual work -- triggered by POST /trips/{id}/proceed, the
+    literal HTTP replacement for the CLI's blocking input() prompt.
+    approved=True is implied by this endpoint having been called at all --
+    there's no separate y/n step here, the human's approval already
+    happened by making the HTTP call.
+
+    driver_* fields are left unset here, deliberately -- they're not
+    persisted on Trip (driver PII is the most sensitive data this project
+    stores, see Trip.wants_car_rental's docstring). If the researcher
+    selected a car rental, propose_bookings() degrades gracefully without
+    them (flight/hotel still get proposed normally) rather than failing
+    outright. A future version of this endpoint could accept driver
+    details in its request body specifically for a car rental proposal."""
+    asyncio.run(_propose_bookings_for_trip(trip_id))
     return trip_id
