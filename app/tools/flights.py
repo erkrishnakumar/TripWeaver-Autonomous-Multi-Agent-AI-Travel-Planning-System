@@ -33,6 +33,7 @@ from app.tools.schemas import (
     FlightSearchInput,
     FlightSearchResult,
     FlightSegment,
+    PassengerDetails,
     ToolError,
 )
 
@@ -41,6 +42,8 @@ _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 # exists -- shared with hotels.py/car_rentals.py's identical caps.
 _MAX_RESULTS_RETURNED = 10
 _FIXTURES_PATH = Path(__file__).parent / "fixtures" / "flight_offers.json"
+
+_AIR_ORDERS_PATH = "/air/orders"
 
 
 class DuffelAPIError(Exception):
@@ -109,6 +112,24 @@ def _extract_cabin_class(raw: dict[str, Any]) -> CabinClass:
     return CabinClass(passengers[0].get("cabin_class", "economy"))
 
 
+def _extract_passenger_ids(raw: dict[str, Any]) -> list[str]:
+    """Duffel generates one passenger id per requested passenger at
+    offer-request time, embedded in each offer's own nested
+    slices[].segments[].passengers[] (same location _extract_cabin_class()
+    reads cabin_class from) -- these ids are IDENTICAL across every
+    segment/offer from the same request, since they all refer to the same
+    travelers. REQUIRED verbatim (not inventable) when actually creating an
+    order later -- see FlightOffer.passenger_ids' docstring."""
+    slices = raw.get("slices", [])
+    if not slices:
+        return []
+    segments = slices[0].get("segments", [])
+    if not segments:
+        return []
+    passengers = segments[0].get("passengers", [])
+    return [p["passenger_id"] for p in passengers if "passenger_id" in p]
+
+
 def _parse_offer(raw: dict[str, Any]) -> FlightOffer:
     segments: list[FlightSegment] = []
     stops_outbound = 0
@@ -136,6 +157,7 @@ def _parse_offer(raw: dict[str, Any]) -> FlightOffer:
         stops_outbound=stops_outbound,
         segments=segments,
         expires_at=raw.get("expires_at"),
+        passenger_ids=_extract_passenger_ids(raw),
     )
 
 
@@ -157,6 +179,26 @@ def _post_offer_request(payload: dict[str, Any]) -> dict[str, Any]:
             f"{settings.duffel_base_url}/air/offer_requests",
             headers=_headers(),
             params={"return_offers": "true"},
+            json=payload,
+        )
+    if resp.status_code >= 400:
+        retryable = resp.status_code in _RETRYABLE_STATUS_CODES
+        message = f"Duffel API returned {resp.status_code}: {resp.text[:300]}"
+        raise DuffelAPIError(resp.status_code, message, retryable)
+    return cast(dict[str, Any], resp.json())
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    retry=retry_if_exception(_is_retryable_duffel_error),
+    reraise=True,
+)
+def _post_order(payload: dict[str, Any]) -> dict[str, Any]:
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.post(
+            f"{settings.duffel_base_url}{_AIR_ORDERS_PATH}",
+            headers=_headers(),
             json=payload,
         )
     if resp.status_code >= 400:
@@ -316,6 +358,112 @@ def search_flights(query: FlightSearchInput) -> FlightSearchResult | ToolError:
     return FlightSearchResult(
         query=query, offers=offers, provider="duffel", is_sandbox=True, is_mock=is_mock
     )
+
+
+def create_flight_order(
+    offer: FlightOffer, passengers: list[PassengerDetails]
+) -> dict[str, Any] | ToolError:
+    """
+    Creates a REAL, CONFIRMED flight order against Duffel's actual
+    /air/orders endpoint. THIS ACTUALLY BOOKS SOMETHING FOR REAL.
+
+    NOT CALLED ANYWHERE IN THIS CODEBASE (yet). Same permanent principle as
+    create_car_rental_booking() in app/tools/car_rentals.py: a real booking
+    is only ever allowed to happen from a separate, explicitly
+    human-triggered path (Gate 2), never automatically. This function
+    exists so the contract is proven now rather than guessed later.
+
+    *** CONTRACT VERIFIED AGAINST REAL DUFFEL DOCS + LIVE SANDBOX (2026-09) ***
+    - type: "instant" (pay immediately using Duffel's sandbox test balance,
+      not "hold").
+    - payments is REQUIRED even for balance payment -- unlike Stays, which
+      omits `payment` entirely for balance (a real, confirmed asymmetry
+      between the two APIs, not a bug). amount/currency must exactly match
+      the offer's own price -- Duffel rejects a mismatched amount.
+    - passengers[].id MUST be one of offer.passenger_ids -- verified live
+      against the real sandbox: Duffel generates these at offer-request
+      time (embedded in the offer's own
+      slices[].segments[].passengers[].passenger_id field), they are NOT
+      inventable. See PassengerDetails' own docstring.
+    """
+    try:
+        settings.validate_duffel()
+    except RuntimeError as e:
+        return ToolError(
+            tool_name="create_flight_order",
+            error_type="config_error",
+            message=str(e),
+            retryable=False,
+        )
+
+    if len(passengers) != len(offer.passenger_ids):
+        return ToolError(
+            tool_name="create_flight_order",
+            error_type="passenger_mismatch",
+            message=(
+                f"Offer {offer.offer_id} requires exactly {len(offer.passenger_ids)} "
+                f"passenger(s), got {len(passengers)}."
+            ),
+            retryable=False,
+        )
+
+    offer_passenger_ids = set(offer.passenger_ids)
+    given_ids = {p.passenger_id for p in passengers}
+    if given_ids != offer_passenger_ids:
+        return ToolError(
+            tool_name="create_flight_order",
+            error_type="passenger_id_mismatch",
+            message=(
+                f"Passenger ids {sorted(given_ids)} do not match this offer's "
+                f"real passenger ids {sorted(offer_passenger_ids)}."
+            ),
+            retryable=False,
+        )
+
+    payload = {
+        "data": {
+            "type": "instant",
+            "selected_offers": [offer.offer_id],
+            "payments": [
+                {
+                    "type": "balance",
+                    "currency": offer.price_currency_original,
+                    "amount": f"{offer.total_price_usd:.2f}",
+                }
+            ],
+            "passengers": [
+                {
+                    "id": p.passenger_id,
+                    "title": p.title.value,
+                    "gender": p.gender.value,
+                    "given_name": p.given_name,
+                    "family_name": p.family_name,
+                    "born_on": p.date_of_birth.isoformat(),
+                    "email": p.email,
+                    "phone_number": p.phone_number,
+                }
+                for p in passengers
+            ],
+        }
+    }
+    try:
+        raw = _post_order(payload)
+    except DuffelAPIError as e:
+        return ToolError(
+            tool_name="create_flight_order",
+            error_type="duffel_api_error",
+            message=e.message,
+            retryable=e.retryable,
+        )
+    except httpx.TimeoutException:
+        return ToolError(
+            tool_name="create_flight_order",
+            error_type="timeout",
+            message="Duffel API did not respond within 15s",
+            retryable=True,
+        )
+
+    return cast(dict[str, Any], raw.get("data", raw))
 
 
 if __name__ == "__main__":

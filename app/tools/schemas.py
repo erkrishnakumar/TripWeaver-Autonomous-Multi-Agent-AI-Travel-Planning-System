@@ -70,6 +70,15 @@ class FlightOffer(BaseModel):
     expires_at: datetime | None = Field(
         default=None, description="Offers expire; re-fetch after this time before booking"
     )
+    passenger_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Duffel's own generated passenger ids for this offer -- REQUIRED "
+            "verbatim when creating a real order later (POST /air/orders); "
+            "Duffel rejects arbitrary passenger ids, they must match what "
+            "it generated at offer-request time. See create_flight_order()."
+        ),
+    )
 
 
 class FlightSearchResult(BaseModel):
@@ -480,6 +489,39 @@ class CarRentalPaymentType(StrEnum):
     PREPAID = "prepaid"
     GUARANTEE = "guarantee"
     POSTPAID = "postpaid"
+
+
+class PassengerTitle(StrEnum):
+    MR = "mr"
+    MRS = "mrs"
+    MS = "ms"
+    MISS = "miss"
+
+
+class PassengerGender(StrEnum):
+    MALE = "m"
+    FEMALE = "f"
+
+
+class PassengerDetails(BaseModel):
+    """Passenger PII required by Duffel's real Orders booking contract
+    (POST /air/orders) -- same sensitivity class as DriverDetails (date of
+    birth, phone number); see that class's docstring for the standing
+    auth/closed-user-group requirement this reinforces.
+
+    passenger_id must be one of the ids from the FlightOffer being booked
+    (FlightOffer.passenger_ids) -- NOT an id you invent. Duffel rejects an
+    order whose passenger ids don't match ones it generated at
+    offer-request time; see create_flight_order()'s docstring."""
+
+    passenger_id: str = Field(..., min_length=1)
+    title: PassengerTitle
+    gender: PassengerGender
+    given_name: str = Field(..., min_length=1)
+    family_name: str = Field(..., min_length=1)
+    date_of_birth: date
+    email: str = Field(..., min_length=3)
+    phone_number: str = Field(..., min_length=3)
 
 
 class DriverDetails(BaseModel):
