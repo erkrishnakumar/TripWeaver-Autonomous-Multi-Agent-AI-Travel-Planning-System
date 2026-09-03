@@ -393,6 +393,24 @@ class ProposeBookingResult(BaseModel):
     )
 
 
+class BookingDecisionResult(BaseModel):
+    """Output contract for confirm_booking()/reject_booking() — Gate 2.
+
+    provider_booking_reference is only ever set after a REAL provider
+    booking succeeded (confirm_booking's success path); it is always None
+    for reject_booking() and for a confirm_booking() call that failed
+    against the real provider (booking_status will be "booking_failed" in
+    that case, not "booked" — see confirm_booking()'s own docstring for why
+    a failed provider call is never disguised as success).
+    """
+
+    booking_id: str
+    approval_id: str
+    booking_status: str
+    provider_booking_reference: str | None = None
+    message: str
+
+
 class TripSummary(BaseModel):
     """Output contract for create_trip() when exposed via the MCP server (and,
     later, the API layer).

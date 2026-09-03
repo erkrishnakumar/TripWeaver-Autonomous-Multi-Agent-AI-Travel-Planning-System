@@ -10,16 +10,25 @@ resumed over HTTP — not something to improvise here).
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
-from app.api.schemas import TripCreate, TripProceedResponse, TripRead
+from app.api.schemas import (
+    ApprovalDecisionResponse,
+    ConfirmApprovalRequest,
+    RejectApprovalRequest,
+    TripCreate,
+    TripProceedResponse,
+    TripRead,
+)
 from app.db.models import Trip
 from app.db.models.enums import TripStatus
+from app.tools.confirm_booking import confirm_booking, reject_booking
 from app.tools.create_trip import create_trip
+from app.tools.schemas import ToolError
 from app.worker.tasks import propose_trip_bookings, run_trip_planning
 
 app = FastAPI(title="TripWeaver API")
@@ -73,4 +82,75 @@ async def proceed_with_trip(
     propose_trip_bookings.delay(str(trip_id))
     return TripProceedResponse(
         trip_id=trip_id, status="approved", message="Bookings are being proposed."
+    )
+
+
+_NOT_FOUND_ERROR_TYPES = {"approval_not_found", "booking_not_found"}
+_CONFLICT_ERROR_TYPES = {"already_decided", "booking_not_pending"}
+
+
+def _raise_for_tool_error(error: ToolError) -> NoReturn:
+    """Gate 2's two endpoints share one error contract (see confirm_booking.
+    py's _load_approval_and_booking()) -- not found / already-decided /
+    everything else map to 404 / 409 / 422 respectively, same reasoning as
+    the existing /trips/{id}/proceed 409 for a trip in the wrong state."""
+    if error.error_type in _NOT_FOUND_ERROR_TYPES:
+        raise HTTPException(status_code=404, detail=error.message)
+    if error.error_type in _CONFLICT_ERROR_TYPES:
+        raise HTTPException(status_code=409, detail=error.message)
+    raise HTTPException(status_code=422, detail=error.message)
+
+
+@app.post("/approvals/{approval_id}/confirm", response_model=ApprovalDecisionResponse)
+async def confirm_approval(
+    approval_id: uuid.UUID,
+    body: ConfirmApprovalRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApprovalDecisionResponse:
+    """Gate 2. THE ONLY endpoint in this project ever allowed to trigger a
+    real provider booking -- see app/tools/confirm_booking.py's module
+    docstring for the full contract, including why a provider-side failure
+    comes back as a normal 200 (booking_status="booking_failed") rather
+    than an HTTP error: the human's approval succeeded, Duffel's booking
+    call is a separate, honestly-reported outcome."""
+    result = await confirm_booking(
+        db,
+        str(approval_id),
+        passengers=body.passengers,
+        guests=body.guests,
+        contact_email=body.contact_email,
+        contact_phone_number=body.contact_phone_number,
+        decided_by=body.decided_by,
+    )
+    if isinstance(result, ToolError):
+        _raise_for_tool_error(result)
+    return ApprovalDecisionResponse(
+        booking_id=uuid.UUID(result.booking_id),
+        approval_id=uuid.UUID(result.approval_id),
+        booking_status=result.booking_status,
+        provider_booking_reference=result.provider_booking_reference,
+        message=result.message,
+    )
+
+
+@app.post("/approvals/{approval_id}/reject", response_model=ApprovalDecisionResponse)
+async def reject_approval(
+    approval_id: uuid.UUID,
+    body: RejectApprovalRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ApprovalDecisionResponse:
+    result = await reject_booking(
+        db,
+        str(approval_id),
+        decided_by=body.decided_by,
+        decision_notes=body.decision_notes,
+    )
+    if isinstance(result, ToolError):
+        _raise_for_tool_error(result)
+    return ApprovalDecisionResponse(
+        booking_id=uuid.UUID(result.booking_id),
+        approval_id=uuid.UUID(result.approval_id),
+        booking_status=result.booking_status,
+        provider_booking_reference=result.provider_booking_reference,
+        message=result.message,
     )

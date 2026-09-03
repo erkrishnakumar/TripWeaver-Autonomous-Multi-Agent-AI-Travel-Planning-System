@@ -12,6 +12,7 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict
 
 from app.db.models.enums import TripStatus
+from app.tools.schemas import HotelGuestDetails, PassengerDetails
 
 
 class TripRead(BaseModel):
@@ -43,4 +44,36 @@ class TripCreate(BaseModel):
 class TripProceedResponse(BaseModel):
     trip_id: uuid.UUID
     status: str
+    message: str
+
+
+class ConfirmApprovalRequest(BaseModel):
+    """Body for POST /approvals/{id}/confirm — Gate 2.
+
+    This is the first and only point in the entire API where real
+    passenger/guest PII is ever submitted; see confirm_booking()'s own
+    docstring for why it is never collected or persisted any earlier.
+    Provide `passengers` for a flight booking, or `guests` +
+    `contact_email` + `contact_phone_number` for a hotel booking — whichever
+    matches the booking this approval is for. Car rental approvals cannot
+    be confirmed yet (see docs/Car_Rental_Payment_Gap.md).
+    """
+
+    passengers: list[PassengerDetails] | None = None
+    guests: list[HotelGuestDetails] | None = None
+    contact_email: str | None = None
+    contact_phone_number: str | None = None
+    decided_by: str | None = None
+
+
+class RejectApprovalRequest(BaseModel):
+    decided_by: str | None = None
+    decision_notes: str | None = None
+
+
+class ApprovalDecisionResponse(BaseModel):
+    booking_id: uuid.UUID
+    approval_id: uuid.UUID
+    booking_status: str
+    provider_booking_reference: str | None = None
     message: str

@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          uv sync --extra dev --extra agents --extra mcp
+          uv sync --extra dev --extra agents --extra mcp --extra api --extra worker
 
       - name: Lint (ruff)
         run: |
