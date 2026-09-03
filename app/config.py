@@ -151,6 +151,13 @@ class Settings:
         "RESEND_FROM_EMAIL", "TripWeaver <onboarding@resend.dev>"
     )
 
+    # Origins allowed to call the API from a browser (the frontend's dev
+    # server and, in prod, its deployed origin) -- comma-separated, since env
+    # vars can't carry a real list. Defaults cover `npm run dev` locally.
+    cors_allowed_origins: list[str] = os.environ.get(
+        "CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",")
+
     def validate_resend(self) -> None:
         if not self.resend_api_key:
             raise RuntimeError(

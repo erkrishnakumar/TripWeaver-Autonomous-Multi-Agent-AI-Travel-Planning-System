@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, NoReturn
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -29,6 +30,7 @@ from app.api.schemas import (
     AuditLogEntryRead,
     BookingRead,
     ConfirmApprovalRequest,
+    ConfirmInfoResponse,
     ForgotPasswordRequest,
     ForgotPasswordResponse,
     LoginRequest,
@@ -45,12 +47,13 @@ from app.auth.passwords import PasswordTooLongError, hash_password, verify_passw
 from app.auth.reset_tokens import generate_reset_token, hash_reset_token
 from app.auth.tokens import create_access_token
 from app.config import settings
-from app.db.models import Approval, AuditLog, Booking, PasswordResetToken, Trip, User
-from app.db.models.enums import TripStatus
+from app.db.models import Approval, AuditLog, Booking, FlightOption, PasswordResetToken, Trip, User
+from app.db.models.enums import BookingType, TripStatus
 from app.email.send_email import EmailSendError, send_password_reset_email
 from app.logging_config import configure_logging
 from app.tools.confirm_booking import confirm_booking, reject_booking
 from app.tools.create_trip import create_trip
+from app.tools.flights import get_flight_offer
 from app.tools.schemas import ToolError
 from app.worker.tasks import propose_trip_bookings, run_trip_planning
 
@@ -78,6 +81,13 @@ def _handle_rate_limit_exceeded(request: Request, exc: Exception) -> Response:
 
 app.add_exception_handler(RateLimitExceeded, _handle_rate_limit_exceeded)
 app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
 DbSession = Annotated[AsyncSession, Depends(get_db)]
@@ -292,6 +302,66 @@ async def list_trip_bookings(
             )
         )
     return read_rows
+
+
+@app.get(
+    "/trips/{trip_id}/bookings/{booking_id}/confirm-info",
+    response_model=ConfirmInfoResponse,
+)
+async def get_booking_confirm_info(
+    trip_id: uuid.UUID, booking_id: uuid.UUID, db: DbSession, current_user: CurrentUser
+) -> ConfirmInfoResponse:
+    """Closes the gap GET /trips/{id}/bookings can't: the real ids needed
+    to fill out POST /approvals/{id}/confirm's body, without a raw DB
+    script. For a flight booking, passenger_ids are LIVE re-fetched from
+    Duffel (get_flight_offer -- the same hallucination-guard re-fetch
+    confirm_booking() itself does before ever booking), never read from a
+    possibly-stale cached value. Hotel bookings need no provider ids at
+    all (guests are freeform names); car bookings can't be confirmed yet
+    (see docs/Car_Rental_Payment_Gap.md)."""
+    trip = await db.get(Trip, trip_id)
+    _trip_or_404(trip, current_user)
+
+    booking = await db.get(Booking, booking_id)
+    if booking is None or booking.trip_id != trip_id:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    approval_result = await db.execute(select(Approval).where(Approval.booking_id == booking.id))
+    approval = approval_result.scalar_one()  # propose_booking() always creates one
+
+    if booking.booking_type == BookingType.FLIGHT:
+        flight_option = await db.get(FlightOption, booking.flight_option_id)
+        assert flight_option is not None  # guaranteed by the FK for a FLIGHT booking
+        offer = get_flight_offer(flight_option.provider_offer_id)
+        if isinstance(offer, ToolError):
+            raise HTTPException(
+                status_code=422, detail=f"Could not refresh this offer: {offer.message}"
+            )
+        return ConfirmInfoResponse(
+            booking_type=booking.booking_type,
+            approval_id=approval.id,
+            passenger_ids=offer.passenger_ids,
+            note=(
+                "Use these passenger_ids verbatim as passengers[].passenger_id in "
+                "POST /approvals/{approval_id}/confirm."
+            ),
+        )
+
+    if booking.booking_type == BookingType.HOTEL:
+        return ConfirmInfoResponse(
+            booking_type=booking.booking_type,
+            approval_id=approval.id,
+            note=(
+                "No provider ids needed -- supply guests[]/contact_email/"
+                "contact_phone_number directly in POST /approvals/{approval_id}/confirm."
+            ),
+        )
+
+    return ConfirmInfoResponse(
+        booking_type=booking.booking_type,
+        approval_id=approval.id,
+        note="Car rental bookings cannot be confirmed yet -- see docs/Car_Rental_Payment_Gap.md.",
+    )
 
 
 @app.get("/trips/{trip_id}/audit-log", response_model=list[AuditLogEntryRead])

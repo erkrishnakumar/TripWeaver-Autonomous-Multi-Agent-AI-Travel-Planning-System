@@ -161,3 +161,20 @@ class BookingRead(BaseModel):
     failure_reason: str | None
     approval_id: uuid.UUID
     approval_decision: ApprovalDecision
+
+
+class ConfirmInfoResponse(BaseModel):
+    """What GET /trips/{id}/bookings alone can't tell an approver: the
+    real, provider-generated ids needed to actually fill out POST
+    /approvals/{id}/confirm's body. Before this endpoint existed, getting
+    a flight booking's real passenger_ids meant a one-off DB script (see
+    docs/TripWeaver_Roadmap.md's open item on this) -- passenger_ids here
+    are LIVE re-fetched from the provider (same hallucination-guard
+    discipline confirm_booking() itself uses), not read from a
+    possibly-stale cached value, so they're guaranteed valid to use
+    immediately."""
+
+    booking_type: BookingType
+    approval_id: uuid.UUID
+    passenger_ids: list[str] | None = None
+    note: str

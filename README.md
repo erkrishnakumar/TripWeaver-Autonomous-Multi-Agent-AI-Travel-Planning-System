@@ -36,7 +36,7 @@ tripweaver/
 ├── alembic/              # Alembic migration environment + versions
 ├── docs/                 # Design docs, roadmap, incident writeups (see Documentation below)
 │                         #   NOTE: docs/ is intentionally excluded from git — see below
-├── tests/                # Unit + integration tests (226 passing)
+├── tests/                # Unit + integration tests (232 passing)
 ├── .github/workflows/    # CI pipeline (ruff, mypy, pytest)
 ├── .pre-commit-config.yaml  # Local pre-commit hooks (ruff check --fix + ruff format)
 ├── Dockerfile             # One image, two roles (api/worker) -- see docker-compose.yml
@@ -175,6 +175,7 @@ curl -X POST http://localhost:8000/trips $AUTH -H "Content-Type: application/jso
 # ... trip researches/plans in the background, lands in AWAITING_APPROVAL ...
 curl -X POST http://localhost:8000/trips/{trip_id}/proceed $AUTH        # Gate 1: propose bookings
 curl http://localhost:8000/trips/{trip_id}/bookings $AUTH               # find the approval_id(s) to act on
+curl http://localhost:8000/trips/{trip_id}/bookings/{booking_id}/confirm-info $AUTH  # real ids needed to confirm (e.g. passenger_ids)
 curl http://localhost:8000/trips/{trip_id}/audit-log $AUTH              # see everything that happened to this trip
 curl -X POST http://localhost:8000/approvals/{approval_id}/confirm $AUTH -d '{...}'  # Gate 2: real booking
 curl -X POST http://localhost:8000/approvals/{approval_id}/reject $AUTH -d '{...}'   # or reject
