@@ -443,6 +443,7 @@ def create_car_rental_booking(quote_id: str, driver: DriverDetails) -> dict[str,
     payload = {
         "data": {
             "quote_id": quote_id,
+            "payment": {"type": "balance"},
             "driver": {
                 "given_name": driver.given_name,
                 "family_name": driver.family_name,
