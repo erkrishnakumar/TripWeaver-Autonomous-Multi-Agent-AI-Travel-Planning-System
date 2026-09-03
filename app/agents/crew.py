@@ -175,10 +175,14 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
             "search for one if it would genuinely help the traveler get around at "
             "the destination — if a car rental isn't needed, say so explicitly "
             "rather than searching for one anyway. Use the tool to search for a "
-            "real rate — do not invent one. Report the winning rate's full details "
-            "exactly as the tool returned them (rate_id, supplier, price, pickup/"
-            "dropoff location and time). If nothing suitable was found, say so "
-            "explicitly instead of guessing.\n\n"
+            "real rate — do not invent one. You may select MORE THAN ONE car "
+            "rental if the trip genuinely needs it — e.g. one to reach the "
+            "departure airport, a separate one to get around at the destination. "
+            "Each must have clearly different pickup/dropoff locations or times; "
+            "don't select more rentals than the trip actually needs. Report each "
+            "winning rate's full details exactly as the tool returned them "
+            "(rate_id, supplier, price, pickup/dropoff location and time). If "
+            "nothing suitable was found, say so explicitly instead of guessing.\n\n"
             "When you call the tool, include EVERY one of its parameters in the "
             "call explicitly — pass null for any you don't need rather than "
             "omitting them. Some providers reject a tool call outright if any "
@@ -192,9 +196,10 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
             + (f"\n\n{car_rental_override}" if car_rental_override else "")
         ),
         expected_output=(
-            "A plain-text report of the single best car rental rate with all its "
-            "fields and its exact rate_id, or an explicit statement that a car "
-            "rental isn't needed or none was found."
+            "A plain-text report of the best car rental rate(s) — one per "
+            "distinct leg that genuinely needs a rental — with all fields and "
+            "exact rate_ids, or an explicit statement that a car rental isn't "
+            "needed or none was found."
         ),
         agent=car_agent,
     )
@@ -228,9 +233,10 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
             "nothing is needed, leave that field null rather than inventing "
             "something to fill it. This also applies when a finding describes an "
             "option (a hotel, a car) but its report text never actually states a "
-            "real search_result_id/rate_id: you MUST leave the WHOLE object "
-            "(selected_hotel or selected_car_rental) null in that case — never "
-            "fill an id field with a placeholder like 'unknown', 'N/A', 'TBD', or "
+            "real search_result_id/rate_id: you MUST leave the WHOLE object out "
+            "(selected_hotel null, or that car rental left out of "
+            "selected_car_rentals entirely) in that case — never fill an id field "
+            "with a placeholder like 'unknown', 'N/A', 'TBD', or "
             "any other non-real value. A placeholder id is exactly as dangerous "
             "as a fabricated one: this project re-fetches every id from the real "
             "provider before ever proposing a booking, so any id that isn't a "
@@ -240,8 +246,9 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
         ),
         expected_output=(
             "A ResearchOutput with the single best flight offer and hotel listing "
-            "(or null if none fit), an optional car rental rate if one was selected "
-            "(null otherwise), plus weather, visa, and ground-transport summaries."
+            "(or null if none fit), zero or more car rental rates in "
+            "selected_car_rentals (empty if none needed), plus weather, visa, and "
+            "ground-transport summaries."
         ),
         agent=formatter,
         output_pydantic=ResearchOutput,

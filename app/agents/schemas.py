@@ -27,22 +27,25 @@ class ResearchOutput(BaseModel):
     get_weather_forecast/check_visa_requirements/estimate_ground_transport/
     search_car_rentals/get_car_rental_quote (see app/agents/tools.py) and is
     expected to pick ONE flight offer and ONE hotel listing it considers the
-    best fit for the trip request — not return every option it found. A car
-    rental is OPTIONAL: only pick one if it's actually useful for this trip
-    (e.g. getting around at the destination), leave it None otherwise. Any
-    of the three can be None if nothing suitable was found (e.g. no flights
-    under budget, or no car needed) — that's a legitimate outcome the
-    budget/planning steps must handle, not a failure.
+    best fit for the trip request — not return every option it found. Car
+    rentals are OPTIONAL and there can be more than one: pick one per
+    distinct leg that genuinely needs it (e.g. home -> departure airport,
+    then destination airport -> hotel are two independent rentals, not one
+    rental covering both), leave the list empty if no car is needed. Any of
+    flight/hotel can be None, and car rentals can be an empty list, if
+    nothing suitable was found (e.g. no flights under budget, or no car
+    needed) — that's a legitimate outcome the budget/planning steps must
+    handle, not a failure.
 
-    selected_car_rental is a RATE (an estimate, see CarRateOption's own
+    selected_car_rentals holds RATEs (estimates, see CarRateOption's own
     docstring) — propose_bookings() in app/agents/flow.py is responsible
-    for re-fetching a firm quote before ever proposing it for booking, the
+    for re-fetching a firm quote before ever proposing one for booking, the
     researcher/planner never see or handle a firm quote.
     """
 
     selected_flight: FlightOffer | None = None
     selected_hotel: HotelListing | None = None
-    selected_car_rental: CarRateOption | None = None
+    selected_car_rentals: list[CarRateOption] = Field(default_factory=list)
     weather_summary: str = Field(
         default="", description="Plain-language weather summary for the trip dates"
     )
@@ -60,18 +63,23 @@ class ResearchOutput(BaseModel):
     @classmethod
     def _empty_dict_means_none(cls, data: Any) -> Any:
         """The researcher LLM sometimes writes `{}` for selected_flight/
-        selected_hotel/selected_car_rental when it found nothing to select,
-        instead of `null` (observed with a local Ollama model formatting
-        this output) -- an empty object still fails FlightOffer/HotelListing/
-        CarRateOption's required fields. Only an EMPTY dict is coerced here;
-        a partially-filled dict is left alone so it still fails loudly, since
-        that indicates real hallucinated/incomplete data, not just the
-        model's "nothing found" idiom."""
+        selected_hotel/selected_car_rentals entries when it found nothing to
+        select, instead of `null`/`[]` (observed with a local Ollama model
+        formatting this output) -- an empty object still fails
+        FlightOffer/HotelListing/CarRateOption's required fields. Only an
+        EMPTY dict is coerced here; a partially-filled dict is left alone so
+        it still fails loudly, since that indicates real hallucinated/
+        incomplete data, not just the model's "nothing found" idiom."""
         if not isinstance(data, dict):
             return data
-        for key in ("selected_flight", "selected_hotel", "selected_car_rental"):
+        for key in ("selected_flight", "selected_hotel"):
             if data.get(key) == {}:
                 data[key] = None
+        car_rentals = data.get("selected_car_rentals")
+        if car_rentals == {}:
+            data["selected_car_rentals"] = []
+        elif isinstance(car_rentals, list):
+            data["selected_car_rentals"] = [item for item in car_rentals if item != {}]
         return data
 
 

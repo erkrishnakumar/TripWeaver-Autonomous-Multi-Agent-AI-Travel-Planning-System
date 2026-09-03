@@ -49,9 +49,9 @@ def _hotel(price: float) -> HotelListing:
     )
 
 
-def _car_rental(price: float) -> CarRateOption:
+def _car_rental(price: float, rate_id: str = "rat_1") -> CarRateOption:
     return CarRateOption(
-        rate_id="rat_1",
+        rate_id=rate_id,
         car_description="Compact - Toyota Corolla or similar",
         supplier_name="Hertz",
         payment_type=CarRentalPaymentType.PREPAID,
@@ -98,13 +98,13 @@ class TestValidateBudget:
         assert result.total_cost_usd == 400.0
 
     def test_car_rental_cost_is_included_in_total(self):
-        result = validate_budget(1000.0, _flight(400.0), _hotel(300.0), _car_rental(150.0))
+        result = validate_budget(1000.0, _flight(400.0), _hotel(300.0), [_car_rental(150.0)])
         assert result.car_rental_cost_usd == 150.0
         assert result.total_cost_usd == 850.0
         assert result.within_budget is True
 
     def test_car_rental_alone_can_push_over_budget(self):
-        result = validate_budget(500.0, _flight(400.0), None, _car_rental(150.0))
+        result = validate_budget(500.0, _flight(400.0), None, [_car_rental(150.0)])
         assert result.total_cost_usd == 550.0
         assert result.within_budget is False
         assert "over the" in result.message
@@ -112,3 +112,14 @@ class TestValidateBudget:
     def test_car_rental_defaults_to_zero_when_not_selected(self):
         result = validate_budget(500.0, _flight(400.0), _hotel(0.0))
         assert result.car_rental_cost_usd == 0.0
+
+    def test_multiple_car_rentals_sum_correctly(self):
+        result = validate_budget(
+            1000.0,
+            _flight(400.0),
+            _hotel(300.0),
+            [_car_rental(100.0, rate_id="rat_1"), _car_rental(75.0, rate_id="rat_2")],
+        )
+        assert result.car_rental_cost_usd == 175.0
+        assert result.total_cost_usd == 875.0
+        assert result.within_budget is True

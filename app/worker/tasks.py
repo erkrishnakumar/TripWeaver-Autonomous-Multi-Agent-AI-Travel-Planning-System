@@ -193,7 +193,7 @@ async def _propose_bookings_for_trip(trip_id: str) -> None:
     nothing_proposed = (
         flow.state.flight_booking is None
         and flow.state.hotel_booking is None
-        and flow.state.car_rental_booking is None
+        and len(flow.state.car_rental_bookings) == 0
     )
     async with get_session() as session:
         trip_row = await session.get(Trip, uuid.UUID(trip_id))

@@ -310,7 +310,7 @@ class TestHallucinationGuardCarRental:
     async def test_fabricated_car_rate_is_rejected_not_proposed(
         self, monkeypatch, sqlite_session_override
     ):
-        research_output = ResearchOutput(selected_car_rental=_car_rate())
+        research_output = ResearchOutput(selected_car_rentals=[_car_rate()])
         plan_output = PlanOutput(itinerary_summary="Trip summary.")
         _patch_crews(monkeypatch, research_output, plan_output)
         monkeypatch.setattr(
@@ -329,7 +329,7 @@ class TestHallucinationGuardCarRental:
         await _kickoff_and_approve(flow, {**_kickoff_args(), **_driver_kwargs()})
         state = flow.state
 
-        assert state.car_rental_booking is None
+        assert len(state.car_rental_bookings) == 0
         assert state.error is not None
         assert "Car rental quote failed" in state.error
 
@@ -342,12 +342,12 @@ class TestHallucinationGuardCarRental:
         self, monkeypatch, sqlite_session_override
     ):
         """Regression test for a real incident: the formatter emitted a
-        placeholder-style id ('rate_12345') instead of leaving
-        selected_car_rental null when the researcher genuinely found no
-        rate. A placeholder id is exactly as dangerous as a fully invented
-        one — this asserts it's caught the same way (real provider
+        placeholder-style id ('rate_12345') instead of leaving that car
+        rental out of selected_car_rentals when the researcher genuinely
+        found no rate. A placeholder id is exactly as dangerous as a fully
+        invented one — this asserts it's caught the same way (real provider
         verification), not by pattern-matching what the id looks like."""
-        research_output = ResearchOutput(selected_car_rental=_car_rate(rate_id="rate_12345"))
+        research_output = ResearchOutput(selected_car_rentals=[_car_rate(rate_id="rate_12345")])
         plan_output = PlanOutput(itinerary_summary="Trip summary.")
         _patch_crews(monkeypatch, research_output, plan_output)
         monkeypatch.setattr(
@@ -365,7 +365,7 @@ class TestHallucinationGuardCarRental:
         flow = flow_module.TripPlanningFlow()
         await _kickoff_and_approve(flow, {**_kickoff_args(), **_driver_kwargs()})
 
-        assert flow.state.car_rental_booking is None
+        assert len(flow.state.car_rental_bookings) == 0
         assert flow.state.error is not None
         assert "Car rental quote failed" in flow.state.error
 
@@ -377,24 +377,33 @@ class TestHallucinationGuardCarRental:
 
 class TestResearchOutputEmptyDictCoercion:
     """Regression test for a real incident: a local Ollama model formatted
-    "nothing found" as {} instead of null for selected_flight/
-    selected_hotel/selected_car_rental — an empty dict otherwise fails
+    "nothing found" as {} instead of null/[] for selected_flight/
+    selected_hotel/selected_car_rentals — an empty dict otherwise fails
     validation against FlightOffer/HotelListing/CarRateOption's required
-    fields with a confusing error instead of just meaning null."""
+    fields with a confusing error instead of just meaning null/empty."""
 
     def test_empty_dict_for_each_optional_field_becomes_none(self):
         output = ResearchOutput.model_validate(
             {
                 "selected_flight": {},
                 "selected_hotel": {},
-                "selected_car_rental": {},
+                "selected_car_rentals": {},
                 "weather_summary": "sunny",
             }
         )
         assert output.selected_flight is None
         assert output.selected_hotel is None
-        assert output.selected_car_rental is None
+        assert output.selected_car_rentals == []
         assert output.weather_summary == "sunny"
+
+    def test_empty_dict_entries_in_car_rentals_list_are_dropped(self):
+        """The same idiom can show up per-item inside the list, not just as
+        the whole field — an empty {} entry should be dropped rather than
+        failing CarRateOption's required fields."""
+        output = ResearchOutput.model_validate(
+            {"selected_car_rentals": [_car_rate().model_dump(mode="json"), {}]}
+        )
+        assert len(output.selected_car_rentals) == 1
 
     def test_partially_filled_dict_still_fails_loudly(self):
         """Only a fully EMPTY dict means "nothing found" — a partially

@@ -91,24 +91,28 @@ def _hotel_listing() -> HotelListing:
     )
 
 
-def _car_rate() -> CarRateOption:
+def _car_rate(
+    rate_id: str = "rat_flow_test",
+    pickup_location_name: str = "Atlanta",
+    dropoff_location_name: str = "Atlanta",
+) -> CarRateOption:
     return CarRateOption(
-        rate_id="rat_flow_test",
+        rate_id=rate_id,
         car_description="Compact - Toyota Corolla or similar",
         supplier_name="Hertz",
         payment_type=CarRentalPaymentType.PREPAID,
         estimated_price_total_usd=150.0,
-        pickup_location_name="Atlanta",
-        dropoff_location_name="Atlanta",
+        pickup_location_name=pickup_location_name,
+        dropoff_location_name=dropoff_location_name,
         pickup_at=datetime(2026, 9, 14, 10, 0),
         dropoff_at=datetime(2026, 9, 17, 10, 0),
     )
 
 
-def _car_quote() -> CarQuoteResult:
+def _car_quote(rate_id: str = "rat_flow_test") -> CarQuoteResult:
     return CarQuoteResult(
-        quote_id="qut_flow_test",
-        rate_id="rat_flow_test",
+        quote_id=f"qut_{rate_id}",
+        rate_id=rate_id,
         total_price_usd=155.0,
         payment_type=CarRentalPaymentType.PREPAID,
     )
@@ -334,18 +338,20 @@ class TestTripPlanningFlowCarRental:
     async def test_selected_car_rental_with_driver_details_is_proposed(
         self, monkeypatch, sqlite_session_override
     ):
-        research_output = ResearchOutput(selected_car_rental=_car_rate())
+        research_output = ResearchOutput(selected_car_rentals=[_car_rate()])
         plan_output = PlanOutput(itinerary_summary="Car rental trip.")
         _patch_crews(monkeypatch, research_output, plan_output)
-        monkeypatch.setattr(flow_module, "get_car_rental_quote", lambda query: _car_quote())
+        monkeypatch.setattr(
+            flow_module, "get_car_rental_quote", lambda query: _car_quote(query.rate_id)
+        )
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         flow = flow_module.TripPlanningFlow()
         await _kickoff_and_approve(flow, {**_kickoff_args(), **_driver_kwargs()})
         state = flow.state
 
-        assert state.car_rental_booking is not None
-        assert state.car_rental_booking.status == "pending_approval"
+        assert len(state.car_rental_bookings) == 1
+        assert state.car_rental_bookings[0].status == "pending_approval"
         assert state.error is None
 
         session_factory = sqlite_session_override
@@ -357,7 +363,7 @@ class TestTripPlanningFlowCarRental:
     async def test_selected_car_rental_without_driver_details_is_not_proposed(
         self, monkeypatch, sqlite_session_override
     ):
-        research_output = ResearchOutput(selected_car_rental=_car_rate())
+        research_output = ResearchOutput(selected_car_rentals=[_car_rate()])
         plan_output = PlanOutput(itinerary_summary="Car rental trip.")
         _patch_crews(monkeypatch, research_output, plan_output)
         monkeypatch.setattr("builtins.input", lambda _: "y")
@@ -366,14 +372,14 @@ class TestTripPlanningFlowCarRental:
         await _kickoff_and_approve(flow, _kickoff_args())  # no driver_* kwargs
         state = flow.state
 
-        assert state.car_rental_booking is None
+        assert len(state.car_rental_bookings) == 0
         assert state.error is not None
         assert "driver details were not provided" in state.error
 
     async def test_car_rental_quote_failure_surfaces_as_error(
         self, monkeypatch, sqlite_session_override
     ):
-        research_output = ResearchOutput(selected_car_rental=_car_rate())
+        research_output = ResearchOutput(selected_car_rentals=[_car_rate()])
         plan_output = PlanOutput(itinerary_summary="Car rental trip.")
         _patch_crews(monkeypatch, research_output, plan_output)
         monkeypatch.setattr(
@@ -392,14 +398,78 @@ class TestTripPlanningFlowCarRental:
         await _kickoff_and_approve(flow, {**_kickoff_args(), **_driver_kwargs()})
         state = flow.state
 
-        assert state.car_rental_booking is None
+        assert len(state.car_rental_bookings) == 0
+        assert state.error is not None
+        assert "Car rental quote failed" in state.error
+
+    async def test_two_car_rentals_both_proposed_independently(
+        self, monkeypatch, sqlite_session_override
+    ):
+        rate_a = _car_rate(
+            rate_id="rat_home_airport", pickup_location_name="Home", dropoff_location_name="JFK"
+        )
+        rate_b = _car_rate(
+            rate_id="rat_dest_hotel", pickup_location_name="ATL", dropoff_location_name="Hotel"
+        )
+        research_output = ResearchOutput(selected_car_rentals=[rate_a, rate_b])
+        plan_output = PlanOutput(itinerary_summary="Two car rentals trip.")
+        _patch_crews(monkeypatch, research_output, plan_output)
+        monkeypatch.setattr(
+            flow_module, "get_car_rental_quote", lambda query: _car_quote(query.rate_id)
+        )
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+
+        flow = flow_module.TripPlanningFlow()
+        await _kickoff_and_approve(flow, {**_kickoff_args(), **_driver_kwargs()})
+        state = flow.state
+
+        assert len(state.car_rental_bookings) == 2
+        assert state.error is None
+
+        session_factory = sqlite_session_override
+        async with session_factory() as session:
+            bookings = (await session.execute(select(Booking))).scalars().all()
+            assert len(bookings) == 2
+
+    async def test_one_car_rental_fails_the_other_still_gets_proposed(
+        self, monkeypatch, sqlite_session_override
+    ):
+        rate_a = _car_rate(
+            rate_id="rat_home_airport", pickup_location_name="Home", dropoff_location_name="JFK"
+        )
+        rate_b = _car_rate(
+            rate_id="rat_dest_hotel", pickup_location_name="ATL", dropoff_location_name="Hotel"
+        )
+        research_output = ResearchOutput(selected_car_rentals=[rate_a, rate_b])
+        plan_output = PlanOutput(itinerary_summary="One fails, one succeeds.")
+        _patch_crews(monkeypatch, research_output, plan_output)
+
+        def _quote_or_fail(query):
+            if query.rate_id == "rat_home_airport":
+                return ToolError(
+                    tool_name="get_car_rental_quote",
+                    error_type="rate_not_found",
+                    message="Rate expired.",
+                    retryable=False,
+                )
+            return _car_quote(query.rate_id)
+
+        monkeypatch.setattr(flow_module, "get_car_rental_quote", _quote_or_fail)
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+
+        flow = flow_module.TripPlanningFlow()
+        await _kickoff_and_approve(flow, {**_kickoff_args(), **_driver_kwargs()})
+        state = flow.state
+
+        assert len(state.car_rental_bookings) == 1
+        assert state.car_rental_bookings[0].status == "pending_approval"
         assert state.error is not None
         assert "Car rental quote failed" in state.error
 
     async def test_nothing_selected_at_all_surfaces_an_informational_error(
         self, monkeypatch, sqlite_session_override
     ):
-        research_output = ResearchOutput()  # flight, hotel, and car rental all None
+        research_output = ResearchOutput()  # flight, hotel, and car rentals all empty
         plan_output = PlanOutput(itinerary_summary="Nothing found.")
         _patch_crews(monkeypatch, research_output, plan_output)
         monkeypatch.setattr("builtins.input", lambda _: "y")
@@ -410,7 +480,7 @@ class TestTripPlanningFlowCarRental:
 
         assert state.flight_booking is None
         assert state.hotel_booking is None
-        assert state.car_rental_booking is None
+        assert len(state.car_rental_bookings) == 0
         assert state.error is not None
         assert "nothing was proposed for booking" in state.error
 

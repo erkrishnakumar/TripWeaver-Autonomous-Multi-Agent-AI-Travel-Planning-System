@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from crewai.flow.flow import Flow, listen, start
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.agents.budget import validate_budget
 from app.agents.crew import build_planning_crew, build_research_crew
@@ -149,7 +149,7 @@ class TripPlanningState(BaseModel):
     approved: bool = False
     flight_booking: ProposeBookingResult | None = None
     hotel_booking: ProposeBookingResult | None = None
-    car_rental_booking: ProposeBookingResult | None = None
+    car_rental_bookings: list[ProposeBookingResult] = Field(default_factory=list)
     error: str | None = None
 
 
@@ -335,7 +335,7 @@ class TripPlanningFlow(Flow[TripPlanningState]):
             max_budget_usd=self.state.max_budget_usd,
             flight=research_output.selected_flight,
             hotel=research_output.selected_hotel,
-            car_rental=research_output.selected_car_rental,
+            car_rentals=research_output.selected_car_rentals,
         )
         self.state.budget_check = budget_check
         async with get_session() as session:
@@ -538,7 +538,7 @@ class TripPlanningFlow(Flow[TripPlanningState]):
                         self.state.hotel_booking = hotel_result
                         await session.commit()
 
-            if research_output.selected_car_rental is not None:
+            for car_rate in research_output.selected_car_rentals:
                 driver_fields = (
                     self.state.driver_given_name,
                     self.state.driver_family_name,
@@ -548,56 +548,59 @@ class TripPlanningFlow(Flow[TripPlanningState]):
                 )
                 if not all(driver_fields):
                     self._add_error(
-                        "A car rental was selected but driver details were not "
-                        "provided, so it could not be proposed for booking."
+                        f"A car rental ({car_rate.pickup_location_name} -> "
+                        f"{car_rate.dropoff_location_name}) was selected but driver "
+                        "details were not provided, so it could not be proposed for "
+                        "booking."
                     )
+                    continue
+
+                from datetime import date as date_cls
+
+                assert self.state.driver_given_name is not None
+                assert self.state.driver_family_name is not None
+                assert self.state.driver_date_of_birth is not None
+                assert self.state.driver_email is not None
+                assert self.state.driver_phone_number is not None
+
+                # Re-fetch a FIRM quote here rather than trusting the
+                # research step's rate estimate — Duffel's own docs warn
+                # the quote price can differ from the rate's price, and
+                # a quote can expire between research and this step.
+                quote = get_car_rental_quote(CarQuoteInput(rate_id=car_rate.rate_id))
+                if isinstance(quote, ToolError):
+                    self._add_error(
+                        f"Car rental quote failed for {car_rate.pickup_location_name} "
+                        f"-> {car_rate.dropoff_location_name}: {quote.message}"
+                    )
+                    continue
+
+                car_result = await propose_booking(
+                    session,
+                    ProposeCarBookingInput(
+                        trip_id=self.state.trip_id,
+                        rate=car_rate,
+                        quote=quote,
+                        driver=DriverDetails(
+                            given_name=self.state.driver_given_name,
+                            family_name=self.state.driver_family_name,
+                            date_of_birth=date_cls.fromisoformat(self.state.driver_date_of_birth),
+                            email=self.state.driver_email,
+                            phone_number=self.state.driver_phone_number,
+                        ),
+                    ),
+                )
+                if isinstance(car_result, ToolError):
+                    self._add_error(f"Car rental proposal failed: {car_result.message}")
+                    await session.rollback()
                 else:
-                    from datetime import date as date_cls
-
-                    assert self.state.driver_given_name is not None
-                    assert self.state.driver_family_name is not None
-                    assert self.state.driver_date_of_birth is not None
-                    assert self.state.driver_email is not None
-                    assert self.state.driver_phone_number is not None
-
-                    # Re-fetch a FIRM quote here rather than trusting the
-                    # research step's rate estimate — Duffel's own docs warn
-                    # the quote price can differ from the rate's price, and
-                    # a quote can expire between research and this step.
-                    quote = get_car_rental_quote(
-                        CarQuoteInput(rate_id=research_output.selected_car_rental.rate_id)
-                    )
-                    if isinstance(quote, ToolError):
-                        self._add_error(f"Car rental quote failed: {quote.message}")
-                    else:
-                        car_result = await propose_booking(
-                            session,
-                            ProposeCarBookingInput(
-                                trip_id=self.state.trip_id,
-                                rate=research_output.selected_car_rental,
-                                quote=quote,
-                                driver=DriverDetails(
-                                    given_name=self.state.driver_given_name,
-                                    family_name=self.state.driver_family_name,
-                                    date_of_birth=date_cls.fromisoformat(
-                                        self.state.driver_date_of_birth
-                                    ),
-                                    email=self.state.driver_email,
-                                    phone_number=self.state.driver_phone_number,
-                                ),
-                            ),
-                        )
-                        if isinstance(car_result, ToolError):
-                            self._add_error(f"Car rental proposal failed: {car_result.message}")
-                            await session.rollback()
-                        else:
-                            self.state.car_rental_booking = car_result
-                            await session.commit()
+                    self.state.car_rental_bookings.append(car_result)
+                    await session.commit()
 
         if (
             self.state.flight_booking is None
             and self.state.hotel_booking is None
-            and self.state.car_rental_booking is None
+            and len(self.state.car_rental_bookings) == 0
             and self.state.error is None
         ):
             self.state.error = (
@@ -629,7 +632,7 @@ def run_trip_planning_flow(
     TripPlanningState's docstring for why.
 
     wants_car_rental defaults to False -- the researcher is instructed to
-    leave selected_car_rental null unless a car rental is actually useful
+    leave selected_car_rentals empty unless a car rental is actually useful
     for the trip, and nothing else in the request signals that, so without
     this flag the researcher has no reason to ever select one. Set it to
     True to deliberately request one (e.g. to test that path end to end).

@@ -92,7 +92,9 @@ def build_researcher_agent(llm: LLM | None = None) -> Agent:
             "for the trip request, along with a weather summary, a visa summary, and "
             "a rough ground-transport cost note. Also consider a car rental if it "
             "would genuinely help the traveler get around at the destination — pick "
-            "one best rate if so, leave it null otherwise; a car rental is optional, "
+            "one or more rates if genuinely needed for distinct legs of the trip "
+            "(e.g. home to the departure airport, then a separate rental at the "
+            "destination), leave the list empty otherwise; car rentals are optional, "
             "unlike the flight and hotel. Prefer options within the traveler's "
             "stated budget when possible, and be explicit when nothing fits."
         ),

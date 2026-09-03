@@ -26,23 +26,25 @@ def validate_budget(
     max_budget_usd: float | None,
     flight: FlightOffer | None,
     hotel: HotelListing | None,
-    car_rental: CarRateOption | None = None,
+    car_rentals: list[CarRateOption] | None = None,
 ) -> BudgetCheckResult:
-    """Compare a selected flight offer + hotel listing + car rental rate
+    """Compare a selected flight offer + hotel listing + car rental rates
     against the trip's max_budget_usd (Trip.max_budget_usd — None means no
     budget was set, in which case everything is considered within budget by
     definition).
 
-    hotel.estimated_price_total_usd and car_rental.estimated_price_total_usd
-    are themselves ESTIMATES (see HotelListing's and CarRateOption's own
-    docstrings in app/tools/schemas.py) — this function doesn't add any
-    further uncertainty on top of that, it just sums what the tools already
-    returned. car_rental defaults to None since it's an optional part of a
-    trip, unlike flight/hotel.
+    hotel.estimated_price_total_usd and each car rental's
+    estimated_price_total_usd are themselves ESTIMATES (see HotelListing's
+    and CarRateOption's own docstrings in app/tools/schemas.py) — this
+    function doesn't add any further uncertainty on top of that, it just
+    sums what the tools already returned. car_rentals defaults to None/empty
+    since a trip can have zero, one, or more (e.g. one to reach the
+    departure airport, a separate one at the destination), unlike flight/
+    hotel which are single selections.
     """
     flight_cost = flight.total_price_usd if flight is not None else 0.0
     hotel_cost = hotel.estimated_price_total_usd if hotel is not None else 0.0
-    car_rental_cost = car_rental.estimated_price_total_usd if car_rental is not None else 0.0
+    car_rental_cost = sum(c.estimated_price_total_usd for c in (car_rentals or []))
     total_cost = flight_cost + hotel_cost + car_rental_cost
 
     if max_budget_usd is None:
