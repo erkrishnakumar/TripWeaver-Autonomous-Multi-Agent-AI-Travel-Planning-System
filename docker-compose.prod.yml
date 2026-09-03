@@ -1,0 +1,38 @@
+# Production overlay -- applied ON TOP of docker-compose.yml, never used
+# alone:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# What changes vs. plain docker-compose.yml (the local-dev default):
+#   - Postgres/Valkey no longer publish a port to the host at all. Locally,
+#     that port mapping exists so `uv run alembic upgrade head` and manual
+#     psql/redis-cli access work directly from the host machine outside
+#     Docker -- a real deployment has no such need, and every hour a
+#     database port sits open to more than the app's own containers is
+#     unnecessary exposure for zero benefit.
+#   - restart: unless-stopped -> always. unless-stopped intentionally
+#     stays stopped if YOU stopped it (e.g. `docker compose stop`) --
+#     correct for local dev where that's usually deliberate. In
+#     production a stopped container is never something to leave silently
+#     down; always restarts it even after that, which only an explicit
+#     `docker compose down` (removing the container) actually prevents.
+#
+# What this deliberately does NOT do: multi-replica scaling, a real
+# secrets manager instead of a mounted .env, TLS termination, or an
+# external managed Postgres/Valkey -- all real next steps once there's an
+# actual deployment target (a specific cloud/VPS) to size decisions
+# against, not something to guess generically here.
+
+services:
+  postgres:
+    ports: []
+    restart: always
+
+  valkey:
+    ports: []
+    restart: always
+
+  api:
+    restart: always
+
+  worker:
+    restart: always

@@ -49,6 +49,15 @@ class Settings:
     celery_broker_url: str = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6380/0")
     celery_result_backend: str = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6380/1")
 
+    # Rate limiting (Phase 9) -- a THIRD Valkey DB index (0/1 are already
+    # Celery's broker/backend), same instance, so this needs no new
+    # infrastructure. Defaults to matching celery_broker_url's host:port
+    # with db=2, but is independently overridable in case rate-limit state
+    # should ever live somewhere else entirely.
+    rate_limit_storage_url: str = os.environ.get(
+        "RATE_LIMIT_STORAGE_URL", "redis://localhost:6380/2"
+    )
+
     # Optional per-task-category overrides for the RESEARCH crew specifically
     # (flight/car/hotel/context/formatter each run as their own Agent -- see
     # crew.py's build_research_crew()). Each is empty by default, meaning

@@ -39,7 +39,9 @@ tripweaver/
 ├── tests/                # Unit + integration tests (226 passing)
 ├── .github/workflows/    # CI pipeline (ruff, mypy, pytest)
 ├── .pre-commit-config.yaml  # Local pre-commit hooks (ruff check --fix + ruff format)
-└── docker-compose.yml    # Local Postgres (Phase 5+) and Valkey (Celery broker/backend)
+├── Dockerfile             # One image, two roles (api/worker) -- see docker-compose.yml
+├── docker-compose.yml    # Full stack: postgres, valkey, migrate (one-off), api, worker
+└── docker-compose.prod.yml  # Production overlay (see Deployment below)
 ```
 
 **A note on `docs/`**: this folder is deliberately excluded from git (see
@@ -195,6 +197,49 @@ keeps consuming tasks alongside the new one. Use `taskkill /PID <pid> /T /F`
 (tree-kill) if you need to stop one. Full incident writeup in
 `docs/Gate2_Live_Verification.md` §5.4.
 
+## Deployment
+
+The full stack runs in Docker -- not just Postgres/Valkey, but the API and
+Celery worker too, built from one shared `Dockerfile` (both services run
+the same image; only the command differs).
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+This starts `postgres`, `valkey`, a one-off `migrate` service (runs
+`alembic upgrade head` and exits -- `api`/`worker` both wait for it to
+finish before starting), `api` (port `8000`), and `worker`. Requires a
+real `.env` in the project root (`docker-compose.yml`'s `env_file: .env`) --
+copy `.env.example` first if you haven't. Inside the compose network,
+`DATABASE_URL`/`CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND`/
+`RATE_LIMIT_STORAGE_URL` are overridden to address `postgres`/`valkey` by
+their service name on the internal network, not the `localhost:5435`/
+`:6380` your `.env` uses for host-side tools like `uv run alembic`.
+
+Check it's up:
+```bash
+curl http://localhost:8000/health
+docker compose logs -f api      # or worker
+```
+
+For a production-like run (no host-published DB/Valkey ports, `restart:
+always` instead of `unless-stopped`), layer the prod overlay on top:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+**Rate limiting** is active on every request (`app/api/rate_limit.py`,
+`slowapi` backed by Valkey): a `60/minute` default, `10/minute` on
+register/login/reset-password, and a tighter `5/hour` on
+forgot-password specifically (each call there triggers a real, metered
+email send). All of this is live-verified against real containers, not
+just built -- see `docs/TripWeaver_Roadmap.md`'s Phase 9 section for the
+full writeup, including a real bug (`RATE_LIMIT_STORAGE_URL` missing from
+the compose file's environment overrides) found by actually running the
+stack rather than just building it.
+
 ## Tests
 
 ```bash
@@ -252,6 +297,6 @@ disk but are not in the GitHub repo:
 - [🟡] Phase 6: observability — `GET /trips/{id}/bookings` and `GET /trips/{id}/audit-log` expose what was previously only visible via a raw DB query. Structured logging (`app/logging_config.py`, every line tagged `[trip=<uuid>]` across the API, worker, and CLI processes) is done and live-verified. Tracing and per-run cost tracking are still open.
 - [x] Phase 7 (v1): agent evals — recorded real LLM/provider failure modes as deterministic regression tests. **Still open**: live-LLM-output-quality evals
 - [x] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, `GET /trips/{id}/bookings`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are all built and live-verified end to end against the real Duffel sandbox. Car rental confirmation is explicitly unsupported pending a card-tokenization frontend (see `docs/Car_Rental_Payment_Gap.md`). **Auth is now built and enforced**: `POST /auth/register`/`login` issue stateless JWT bearer tokens, `POST /auth/forgot-password`/`reset-password` support account recovery with real email delivery via Resend (falls back to returning the token directly only when `RESEND_API_KEY` isn't configured), and every trip/approval endpoint requires a token plus checks per-user ownership (see `docs/Auth_Requirement.md`).
-- [ ] Phase 9: deployment
+- [x] Phase 9: deployment — the full stack (API, worker, Postgres, Valkey) runs in Docker via `docker-compose.yml`, with a `docker-compose.prod.yml` overlay and Valkey-backed rate limiting (`slowapi`). Live-verified with real containers, not just built. Deliberately out of scope for now: multi-replica scaling, a real secrets manager, TLS termination.
 
 See `docs/TripWeaver_Roadmap.md` for the full breakdown, including known open items.

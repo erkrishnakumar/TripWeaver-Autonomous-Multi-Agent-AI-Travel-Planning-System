@@ -1,0 +1,14 @@
+.venv
+__pycache__
+*.pyc
+.git
+.pytest_cache
+.ruff_cache
+.mypy_cache
+docs/
+logs/
+.env
+.env.*
+!.env.example
+.pre-commit-config.yaml
+*.md

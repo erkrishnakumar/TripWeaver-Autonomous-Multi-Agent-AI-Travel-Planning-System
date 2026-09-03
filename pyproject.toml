@@ -62,6 +62,13 @@ api = [
     # dead-simple API-key setup with no domain verification needed to
     # start (their shared onboarding@resend.dev sender works immediately).
     "resend>=2.0",
+    # Rate limiting (Phase 9) -- slowapi wraps the `limits` library with
+    # FastAPI-native decorators/middleware. Backed by Valkey (the same
+    # instance Celery already uses, a separate DB index) so limits are
+    # shared correctly across multiple API replicas, not per-process
+    # in-memory counters that would silently reset on every restart or
+    # disagree between replicas.
+    "slowapi>=0.1.9",
 ]
 
 dev = [

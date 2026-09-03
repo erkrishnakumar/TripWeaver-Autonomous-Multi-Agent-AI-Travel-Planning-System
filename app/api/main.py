@@ -14,12 +14,16 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, NoReturn
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user, get_db
+from app.api.rate_limit import limiter
 from app.api.schemas import (
     ApprovalDecisionResponse,
     AuditLogEntryRead,
@@ -55,6 +59,26 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="TripWeaver API")
 
+app.state.limiter = limiter
+
+
+def _handle_rate_limit_exceeded(request: Request, exc: Exception) -> Response:
+    """Thin adapter around slowapi's own handler -- Starlette's
+    add_exception_handler() expects a (Request, Exception) -> Response
+    signature, but slowapi's handler is typed narrower ((Request,
+    RateLimitExceeded) -> Response), a real mypy --strict mismatch against
+    the stub, not a runtime one: Starlette guarantees this handler is only
+    ever invoked for a RateLimitExceeded (that's the whole point of
+    registering it against that specific exception type), so the isinstance
+    check below is a formality that satisfies mypy without changing
+    behavior."""
+    assert isinstance(exc, RateLimitExceeded)
+    return _rate_limit_exceeded_handler(request, exc)
+
+
+app.add_exception_handler(RateLimitExceeded, _handle_rate_limit_exceeded)
+app.add_middleware(SlowAPIMiddleware)
+
 CurrentUser = Annotated[User, Depends(get_current_user)]
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
@@ -65,7 +89,8 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/auth/register", response_model=UserRead, status_code=201)
-async def register(body: RegisterRequest, db: DbSession) -> User:
+@limiter.limit("10/minute")
+async def register(request: Request, body: RegisterRequest, db: DbSession) -> User:
     """Deliberately open self-registration, not invite-only -- Duffel's
     "closed user group" requirement (see docs/Auth_Requirement.md) means
     every request must come from an authenticated, identifiable user, not
@@ -87,7 +112,8 @@ async def register(body: RegisterRequest, db: DbSession) -> User:
 
 
 @app.post("/auth/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: DbSession) -> TokenResponse:
+@limiter.limit("10/minute")
+async def login(request: Request, body: LoginRequest, db: DbSession) -> TokenResponse:
     result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
     invalid_credentials = HTTPException(status_code=401, detail="Incorrect email or password.")
@@ -104,10 +130,17 @@ _FORGOT_PASSWORD_GENERIC_MESSAGE = (
 
 
 @app.post("/auth/forgot-password", response_model=ForgotPasswordResponse)
-async def forgot_password(body: ForgotPasswordRequest, db: DbSession) -> ForgotPasswordResponse:
+@limiter.limit("5/hour")
+async def forgot_password(
+    request: Request, body: ForgotPasswordRequest, db: DbSession
+) -> ForgotPasswordResponse:
     """Issues a single-use, expiring reset token and emails it via Resend
-    (app/email/send_email.py). Returns the SAME generic message whether or
-    not the email matched a real account, and never reveals whether the
+    (app/email/send_email.py). Rate-limited tighter than every other auth
+    endpoint (5/hour, not the usual 10/minute) since each call costs a
+    real email send through Resend's own quota -- this is the one auth
+    endpoint where abuse has a real, metered cost attached, not just
+    unwanted load. Returns the SAME generic message whether or not the
+    email matched a real account, and never reveals whether the
     email actually sent successfully -- both are real user-enumeration
     vectors otherwise (a different message, or a different HTTP status on
     a Resend outage, would let a caller learn which emails have accounts).
@@ -148,7 +181,8 @@ async def forgot_password(body: ForgotPasswordRequest, db: DbSession) -> ForgotP
 
 
 @app.post("/auth/reset-password", response_model=UserRead)
-async def reset_password(body: ResetPasswordRequest, db: DbSession) -> User:
+@limiter.limit("10/minute")
+async def reset_password(request: Request, body: ResetPasswordRequest, db: DbSession) -> User:
     invalid_token = HTTPException(
         status_code=400, detail="This reset token is invalid, expired, or already used."
     )

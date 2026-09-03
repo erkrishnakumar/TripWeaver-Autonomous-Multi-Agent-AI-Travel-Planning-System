@@ -40,6 +40,93 @@ services:
 
     restart: unless-stopped
 
+  # One-off: runs `alembic upgrade head` against the real `postgres`
+  # service (not localhost:5435 -- that host-mapped port is for running
+  # alembic from your own machine; inside the compose network, services
+  # reach Postgres via its service name on its container-internal 5432)
+  # and exits. `api`/`worker` both wait for this to exit successfully
+  # before starting, so neither ever runs against a schema mid-migration.
+  migrate:
+    build: .
+    container_name: tripweaver-migrate
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://tripweaver:tripweaver@postgres:5432/tripweaver
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    build: .
+    container_name: tripweaver-api
+
+    env_file: .env
+    environment:
+      # Overrides .env's host-facing localhost:5435/6380 -- inside the
+      # compose network, services address each other by service name on
+      # their container-internal port, never the host-mapped one.
+      DATABASE_URL: postgresql://tripweaver:tripweaver@postgres:5432/tripweaver
+      CELERY_BROKER_URL: redis://valkey:6379/0
+      CELERY_RESULT_BACKEND: redis://valkey:6379/1
+      RATE_LIMIT_STORAGE_URL: redis://valkey:6379/2
+
+    ports:
+      - "8000:8000"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: tripweaver-worker
+
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://tripweaver:tripweaver@postgres:5432/tripweaver
+      CELERY_BROKER_URL: redis://valkey:6379/0
+      CELERY_RESULT_BACKEND: redis://valkey:6379/1
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+    # --pool=solo everywhere, not just on Windows dev machines -- matches
+    # the exact command developers already run locally (see README.md),
+    # so "works in Docker" and "works when I run it myself" never diverge.
+    # A production deployment wanting real concurrency should switch this
+    # to --pool=prefork -c <N> once there's an actual load profile to size
+    # it against; premature to guess a worker count now.
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=info", "--pool=solo"]
+
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.worker.celery_app", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+    restart: unless-stopped
+
 volumes:
   tripweaver_postgres_data:
   tripweaver_valkey_data:
