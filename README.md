@@ -151,9 +151,22 @@ Then:
 curl -X POST http://localhost:8000/trips -H "Content-Type: application/json" -d '{...}'
 # ... trip researches/plans in the background, lands in AWAITING_APPROVAL ...
 curl -X POST http://localhost:8000/trips/{trip_id}/proceed              # Gate 1: propose bookings
+curl http://localhost:8000/trips/{trip_id}/bookings                     # find the approval_id(s) to act on
 curl -X POST http://localhost:8000/approvals/{approval_id}/confirm -d '{...}'  # Gate 2: real booking
 curl -X POST http://localhost:8000/approvals/{approval_id}/reject -d '{...}'   # or reject
 ```
+This entire sequence is live-verified against the real Duffel sandbox
+through the actual running API (not just as direct function calls) — see
+`docs/Gate2_Live_Verification.md` §5.
+
+**Windows note**: if you restart the Celery worker (e.g. to change env
+vars), verify only one is left running with
+`uv run celery -A app.worker.celery_app inspect ping` before creating a new
+trip. `uv run celery ... --pool=solo` spawns a 3-process-deep tree; killing
+only the top-level PID leaves the real worker running as an orphan that
+keeps consuming tasks alongside the new one. Use `taskkill /PID <pid> /T /F`
+(tree-kill) if you need to stop one. Full incident writeup in
+`docs/Gate2_Live_Verification.md` §5.4.
 
 ## Tests
 
@@ -207,11 +220,11 @@ disk but are not in the GitHub repo:
 - [x] Phase 2: MCP server wrapping (11 tools)
 - [x] Phase 2.1: ground transport cost estimation
 - [x] Phase 3: CrewAI agents + Flow with human-approval gate
-- [x] Phase 4: Gate 1 (`propose_booking()` + `POST /trips/{id}/proceed`) — done and live-verified
+- [x] Phase 4: Gate 1 + Gate 2 (`propose_booking()`/`confirm_booking()`/`reject_booking()`) — done, live-verified against the real Duffel sandbox **through the actual running HTTP API**, not just direct function calls (real flight order, reference `VFZC6E`)
 - [x] Phase 5: Postgres persistence — verified live against real Postgres
 - [ ] Phase 6: observability
 - [x] Phase 7 (v1): agent evals — recorded real LLM/provider failure modes as deterministic regression tests. **Still open**: live-LLM-output-quality evals
-- [🟡] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are built and live-verified for flights/hotels against the real Duffel sandbox. Car rental confirmation is explicitly unsupported pending a card-tokenization frontend (see `docs/Car_Rental_Payment_Gap.md`). Auth (login endpoint, session/token issuance, middleware) is still fully open — the foundation (`User` model, bcrypt hashing) exists but nothing is wired up yet.
+- [x] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, `GET /trips/{id}/bookings`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are all built and live-verified end to end against the real Duffel sandbox. Car rental confirmation is explicitly unsupported pending a card-tokenization frontend (see `docs/Car_Rental_Payment_Gap.md`). Auth (login endpoint, session/token issuance, middleware) is still fully open — the foundation (`User` model, bcrypt hashing) exists but nothing is wired up yet.
 - [ ] Phase 9: deployment
 
 See `docs/TripWeaver_Roadmap.md` for the full breakdown, including known open items.
