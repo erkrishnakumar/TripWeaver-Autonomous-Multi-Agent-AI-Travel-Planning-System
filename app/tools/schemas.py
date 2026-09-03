@@ -226,12 +226,44 @@ class HotelListing(BaseModel):
     latitude: float
     longitude: float
     estimated_price_total_usd: float
+    rate_id: str | None = Field(
+        default=None,
+        description=(
+            "The cheapest bookable rate's own id (accommodation.rooms[].rates[].id "
+            "in Duffel's real fetch_all_rates response) -- only present after "
+            "get_hotel_rate() (the fetch_all_rates step), never from search_hotels() "
+            "directly, which is too lightweight to include individual rates. "
+            "REQUIRED (not inventable) to get a real quote -- see get_hotel_quote()."
+        ),
+    )
     price_currency_original: str = "USD"
     nights: int
     expires_at: datetime | None = Field(
         default=None,
         description="This search result expires; re-search or fetch rates before booking",
     )
+
+
+class HotelGuestDetails(BaseModel):
+    """Guest name required by Duffel's real Stays booking contract
+    (POST /stays/bookings) -- lighter than PassengerDetails/DriverDetails
+    since Stays only wants given_name/family_name per guest; email/phone
+    are booking-level, not per-guest (see create_hotel_booking())."""
+
+    given_name: str = Field(..., min_length=1)
+    family_name: str = Field(..., min_length=1)
+
+
+class HotelQuoteResult(BaseModel):
+    """Output of get_hotel_quote() -- a FIRM, bookable price for one rate.
+    Same principle as CarQuoteResult: always show/use THIS price before a
+    human approves anything, never the original rate's estimated price."""
+
+    quote_id: str
+    rate_id: str
+    total_price_usd: float
+    price_currency_original: str = "USD"
+    expires_at: datetime | None = None
 
 
 class HotelSearchResult(BaseModel):

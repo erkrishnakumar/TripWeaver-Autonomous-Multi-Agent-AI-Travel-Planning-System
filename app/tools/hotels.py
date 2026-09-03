@@ -48,7 +48,18 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from app.config import settings
 from app.tools.geocoding import GeocodingAPIError, geocode_city
-from app.tools.schemas import HotelListing, HotelSearchInput, HotelSearchResult, ToolError
+from app.tools.schemas import (
+    HotelGuestDetails,
+    HotelListing,
+    HotelQuoteResult,
+    HotelSearchInput,
+    HotelSearchResult,
+    ToolError,
+)
+
+_STAYS_SEARCH_PATH = "/stays/search"
+_STAYS_QUOTES_PATH = "/stays/quotes"
+_STAYS_BOOKINGS_PATH = "/stays/bookings"
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 # See the comment at its use site below (search_hotels()) for why this
@@ -105,6 +116,22 @@ def _build_stays_search_payload(
     }
 
 
+def _extract_cheapest_rate_id(raw: dict[str, Any]) -> str | None:
+    """The cheapest bookable rate's own id, nested at
+    accommodation.rooms[].rates[].id in Duffel's real fetch_all_rates
+    response -- verified live against the sandbox, not assumed. Only
+    present when raw came from fetch_all_rates (get_hotel_rate()); a plain
+    search_hotels() result has no "rooms" key at all (too lightweight),
+    so this correctly returns None for those, matching HotelListing.
+    rate_id's own default."""
+    rooms = raw.get("accommodation", {}).get("rooms", [])
+    all_rates = [rate for room in rooms for rate in room.get("rates", [])]
+    if not all_rates:
+        return None
+    cheapest = min(all_rates, key=lambda r: float(r["total_amount"]))
+    return str(cheapest["id"])
+
+
 def _parse_search_result(raw: dict[str, Any], nights: int) -> HotelListing:
     """Matches Duffel's real Search Result schema:
     https://duffel.com/docs/api/v2/search-result/schema
@@ -132,6 +159,7 @@ def _parse_search_result(raw: dict[str, Any], nights: int) -> HotelListing:
         price_currency_original=raw.get("cheapest_rate_currency", "USD"),
         nights=nights,
         expires_at=raw.get("expires_at"),
+        rate_id=_extract_cheapest_rate_id(raw),
     )
 
 
@@ -178,6 +206,46 @@ def _post_fetch_all_rates(search_result_id: str) -> dict[str, Any]:
             f"{settings.duffel_base_url}/stays/search_results/{search_result_id}"
             "/actions/fetch_all_rates",
             headers=_headers(),
+        )
+    if resp.status_code >= 400:
+        retryable = resp.status_code in _RETRYABLE_STATUS_CODES
+        message = f"Duffel Stays API returned {resp.status_code}: {resp.text[:300]}"
+        raise DuffelStaysAPIError(resp.status_code, message, retryable)
+    return cast(dict[str, Any], resp.json())
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    retry=retry_if_exception(_is_retryable_stays_error),
+    reraise=True,
+)
+def _post_stays_quote(rate_id: str) -> dict[str, Any]:
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.post(
+            f"{settings.duffel_base_url}{_STAYS_QUOTES_PATH}",
+            headers=_headers(),
+            json={"data": {"rate_id": rate_id}},
+        )
+    if resp.status_code >= 400:
+        retryable = resp.status_code in _RETRYABLE_STATUS_CODES
+        message = f"Duffel Stays API returned {resp.status_code}: {resp.text[:300]}"
+        raise DuffelStaysAPIError(resp.status_code, message, retryable)
+    return cast(dict[str, Any], resp.json())
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    retry=retry_if_exception(_is_retryable_stays_error),
+    reraise=True,
+)
+def _post_stays_booking(payload: dict[str, Any]) -> dict[str, Any]:
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.post(
+            f"{settings.duffel_base_url}{_STAYS_BOOKINGS_PATH}",
+            headers=_headers(),
+            json=payload,
         )
     if resp.status_code >= 400:
         retryable = resp.status_code in _RETRYABLE_STATUS_CODES
@@ -254,6 +322,113 @@ def get_hotel_rate(search_result_id: str, nights: int) -> HotelListing | ToolErr
         )
 
     return _parse_search_result(raw.get("data", raw), nights)
+
+
+def get_hotel_quote(rate_id: str) -> HotelQuoteResult | ToolError:
+    """
+    Firms up a hotel rate's price before it can be booked (POST
+    /stays/quotes) -- the missing middle step between get_hotel_rate()
+    (fetch_all_rates) and a real booking. Verified live against the real
+    sandbox (2026-09): Stays turns out to have the SAME 3-step
+    search -> quote -> book flow Cars already has, not the 2-step flow
+    this module's own docstring originally assumed.
+
+    Always use THIS result's price, never the original rate's estimated
+    price, once a specific rate has been chosen -- same principle as
+    get_car_rental_quote().
+    """
+    try:
+        settings.validate_duffel()
+    except RuntimeError as e:
+        return ToolError(
+            tool_name="get_hotel_quote",
+            error_type="config_error",
+            message=str(e),
+            retryable=False,
+        )
+
+    try:
+        raw = _post_stays_quote(rate_id)
+    except DuffelStaysAPIError as e:
+        return ToolError(
+            tool_name="get_hotel_quote",
+            error_type="duffel_api_error",
+            message=e.message,
+            retryable=e.retryable,
+        )
+    except httpx.TimeoutException:
+        return ToolError(
+            tool_name="get_hotel_quote",
+            error_type="timeout",
+            message="Duffel Stays API did not respond within 15s",
+            retryable=True,
+        )
+
+    data = raw.get("data", raw)
+    return HotelQuoteResult(
+        quote_id=data["id"],
+        rate_id=rate_id,
+        total_price_usd=float(data["total_amount"]),
+        price_currency_original=data.get("total_currency", "USD"),
+        expires_at=data.get("expires_at"),
+    )
+
+
+def create_hotel_booking(
+    quote_id: str, email: str, phone_number: str, guests: list[HotelGuestDetails]
+) -> dict[str, Any] | ToolError:
+    """
+    Creates a REAL, CONFIRMED hotel booking against Duffel's actual
+    /stays/bookings endpoint. THIS ACTUALLY BOOKS SOMETHING FOR REAL.
+
+    NOT CALLED ANYWHERE IN THIS CODEBASE (yet). Same permanent principle as
+    create_car_rental_booking()/create_flight_order(): a real booking is
+    only ever allowed to happen from a separate, explicitly human-triggered
+    path (Gate 2), never automatically.
+
+    *** CONTRACT VERIFIED AGAINST REAL DUFFEL DOCS (2026-09) ***
+    email/phone_number are BOOKING-level (the lead guest's contact info),
+    NOT per-guest -- unlike flights, where every passenger needs their own
+    contact info. `payment` is deliberately omitted from the payload
+    entirely for balance payment -- a real, confirmed asymmetry with
+    flights, which requires an explicit `payments` array even for balance.
+    """
+    try:
+        settings.validate_duffel()
+    except RuntimeError as e:
+        return ToolError(
+            tool_name="create_hotel_booking",
+            error_type="config_error",
+            message=str(e),
+            retryable=False,
+        )
+
+    payload = {
+        "data": {
+            "quote_id": quote_id,
+            "email": email,
+            "phone_number": phone_number,
+            "guests": [{"given_name": g.given_name, "family_name": g.family_name} for g in guests],
+        }
+    }
+    try:
+        raw = _post_stays_booking(payload)
+    except DuffelStaysAPIError as e:
+        return ToolError(
+            tool_name="create_hotel_booking",
+            error_type="duffel_api_error",
+            message=e.message,
+            retryable=e.retryable,
+        )
+    except httpx.TimeoutException:
+        return ToolError(
+            tool_name="create_hotel_booking",
+            error_type="timeout",
+            message="Duffel Stays API did not respond within 15s",
+            retryable=True,
+        )
+
+    return cast(dict[str, Any], raw.get("data", raw))
 
 
 def search_hotels(query: HotelSearchInput) -> HotelSearchResult | ToolError:
