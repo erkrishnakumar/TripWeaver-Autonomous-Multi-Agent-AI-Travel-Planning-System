@@ -39,6 +39,14 @@ class User(Base, TimestampMixin):
         index=True,
     )
 
+    # Nullable: existing rows predate this column, and nothing in the auth
+    # flow depends on it being set (email is still the unique identity).
+    # Display-only.
+    full_name: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+
     hashed_password: Mapped[str] = mapped_column(
         String(255),
         nullable=False,

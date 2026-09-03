@@ -83,6 +83,7 @@ class ApprovalDecisionResponse(BaseModel):
 class RegisterRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=320)
     password: str = Field(..., min_length=8)
+    full_name: str | None = Field(None, min_length=1, max_length=200)
 
 
 class LoginRequest(BaseModel):
@@ -125,6 +126,7 @@ class UserRead(BaseModel):
 
     id: uuid.UUID
     email: str
+    full_name: str | None
     is_active: bool
 
 

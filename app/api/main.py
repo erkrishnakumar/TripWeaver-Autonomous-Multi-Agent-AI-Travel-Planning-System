@@ -115,7 +115,7 @@ async def register(request: Request, body: RegisterRequest, db: DbSession) -> Us
     except PasswordTooLongError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
-    user = User(id=uuid.uuid4(), email=body.email, hashed_password=hashed)
+    user = User(id=uuid.uuid4(), email=body.email, hashed_password=hashed, full_name=body.full_name)
     db.add(user)
     await db.commit()
     return user
@@ -132,6 +132,11 @@ async def login(request: Request, body: LoginRequest, db: DbSession) -> TokenRes
     if not user.is_active:
         raise HTTPException(status_code=403, detail="This account has been deactivated.")
     return TokenResponse(access_token=create_access_token(str(user.id)))
+
+
+@app.get("/auth/me", response_model=UserRead)
+async def get_me(current_user: CurrentUser) -> User:
+    return current_user
 
 
 _FORGOT_PASSWORD_GENERIC_MESSAGE = (
