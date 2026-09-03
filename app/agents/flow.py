@@ -759,6 +759,10 @@ def capture_output_to_log_file(label: str) -> Iterator[Path]:
 if __name__ == "__main__":
     from datetime import date, timedelta
 
+    from app.logging_config import configure_logging
+
+    configure_logging()
+
     # Windows' default console codepage (cp1252) can't encode the emoji in
     # CrewAI's Rich-based progress panels -- verified live: running this
     # script with stdout redirected to a file (not an interactive terminal)

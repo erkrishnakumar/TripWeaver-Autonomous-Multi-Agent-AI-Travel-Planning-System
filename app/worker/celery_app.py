@@ -12,8 +12,22 @@ it with no changes needed.
 from __future__ import annotations
 
 from celery import Celery
+from celery.signals import setup_logging
 
 from app.config import settings
+from app.logging_config import configure_logging
+
+
+@setup_logging.connect
+def _configure_worker_logging(**kwargs: object) -> None:
+    """Connecting to this signal tells Celery to skip its own default
+    logging setup entirely (per Celery's own docs) -- without it, Celery
+    configures the root logger itself before this module's own
+    configure_logging() ever runs, and whichever one runs second wins in
+    an order that isn't obviously deterministic. This makes ours the only
+    configuration that ever applies inside a worker process."""
+    configure_logging()
+
 
 celery_app = Celery(
     "tripweaver",

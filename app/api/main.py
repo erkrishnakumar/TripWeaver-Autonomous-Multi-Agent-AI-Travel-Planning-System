@@ -9,6 +9,7 @@ resumed over HTTP — not something to improvise here).
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Annotated, NoReturn
 
@@ -36,10 +37,14 @@ from app.auth.passwords import PasswordTooLongError, hash_password, verify_passw
 from app.auth.tokens import create_access_token
 from app.db.models import Approval, AuditLog, Booking, Trip, User
 from app.db.models.enums import TripStatus
+from app.logging_config import configure_logging
 from app.tools.confirm_booking import confirm_booking, reject_booking
 from app.tools.create_trip import create_trip
 from app.tools.schemas import ToolError
 from app.worker.tasks import propose_trip_bookings, run_trip_planning
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="TripWeaver API")
 
@@ -117,6 +122,12 @@ async def create_trip_endpoint(body: TripCreate, db: DbSession, current_user: Cu
     )
     await db.commit()
     run_trip_planning.delay(str(trip.id))
+    logger.info(
+        "Trip created (%s -> %s), enqueued for research/planning",
+        trip.origin_iata,
+        trip.destination_iata,
+        extra={"trip_id": trip.id},
+    )
     return trip
 
 
@@ -183,6 +194,7 @@ async def proceed_with_trip(
             detail=f"Trip is not awaiting approval (current status: {trip.status.value})",
         )
     propose_trip_bookings.delay(str(trip_id))
+    logger.info("Gate 1: human approved, proposing bookings", extra={"trip_id": trip_id})
     return TripProceedResponse(
         trip_id=trip_id, status="approved", message="Bookings are being proposed."
     )
@@ -206,23 +218,26 @@ def _raise_for_tool_error(error: ToolError) -> NoReturn:
 
 async def _require_own_approval(
     db: AsyncSession, approval_id: uuid.UUID, current_user: User
-) -> None:
+) -> uuid.UUID:
     """Same not-found-not-forbidden discipline as _trip_or_404, one join
     deeper: Approval -> Booking -> Trip.user_id. Deliberately checked here
     at the API layer, not inside confirm_booking()/reject_booking()
     themselves -- those stay auth-agnostic and reusable (e.g. from a future
     CLI/admin tool with no concept of "the current HTTP user"), same
     separation of concerns as propose_booking() never importing anything
-    from app/api/."""
+    from app/api/. Returns the owning trip's id so callers can tag their
+    own log lines with it -- confirm/reject only ever receive an
+    approval_id, not a trip_id, otherwise."""
     result = await db.execute(
-        select(Trip.user_id)
+        select(Trip.id, Trip.user_id)
         .join(Booking, Booking.trip_id == Trip.id)
         .join(Approval, Approval.booking_id == Booking.id)
         .where(Approval.id == approval_id)
     )
-    owner_id = result.scalar_one_or_none()
-    if owner_id is None or owner_id != current_user.id:
+    row = result.one_or_none()
+    if row is None or row.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Approval not found")
+    return uuid.UUID(str(row.id))
 
 
 @app.post("/approvals/{approval_id}/confirm", response_model=ApprovalDecisionResponse)
@@ -238,7 +253,7 @@ async def confirm_approval(
     comes back as a normal 200 (booking_status="booking_failed") rather
     than an HTTP error: the human's approval succeeded, Duffel's booking
     call is a separate, honestly-reported outcome."""
-    await _require_own_approval(db, approval_id, current_user)
+    trip_id = await _require_own_approval(db, approval_id, current_user)
     result = await confirm_booking(
         db,
         str(approval_id),
@@ -249,7 +264,14 @@ async def confirm_approval(
         decided_by=body.decided_by,
     )
     if isinstance(result, ToolError):
+        logger.warning("Gate 2 confirm rejected: %s", result.message, extra={"trip_id": trip_id})
         _raise_for_tool_error(result)
+    logger.info(
+        "Gate 2: confirm -> %s (ref=%s)",
+        result.booking_status,
+        result.provider_booking_reference,
+        extra={"trip_id": trip_id},
+    )
     return ApprovalDecisionResponse(
         booking_id=uuid.UUID(result.booking_id),
         approval_id=uuid.UUID(result.approval_id),
@@ -266,7 +288,7 @@ async def reject_approval(
     db: DbSession,
     current_user: CurrentUser,
 ) -> ApprovalDecisionResponse:
-    await _require_own_approval(db, approval_id, current_user)
+    trip_id = await _require_own_approval(db, approval_id, current_user)
     result = await reject_booking(
         db,
         str(approval_id),
@@ -274,7 +296,9 @@ async def reject_approval(
         decision_notes=body.decision_notes,
     )
     if isinstance(result, ToolError):
+        logger.warning("Gate 2 reject call failed: %s", result.message, extra={"trip_id": trip_id})
         _raise_for_tool_error(result)
+    logger.info("Gate 2: human rejected the proposed booking", extra={"trip_id": trip_id})
     return ApprovalDecisionResponse(
         booking_id=uuid.UUID(result.booking_id),
         approval_id=uuid.UUID(result.approval_id),

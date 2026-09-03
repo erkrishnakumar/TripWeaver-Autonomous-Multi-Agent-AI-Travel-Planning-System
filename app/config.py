@@ -98,6 +98,13 @@ class Settings:
         os.environ.get("GROUND_TRANSPORT_MIN_FARE_USD", "3.0")
     )
 
+    # Observability (Phase 6) -- see app/logging_config.py, the ONE place
+    # this is read. Standard Python logging level names (DEBUG/INFO/
+    # WARNING/ERROR); INFO by default shows every task/request lifecycle
+    # event this project logs without CrewAI's own DEBUG-level tool-call
+    # chatter drowning it out.
+    log_level: str = os.environ.get("LOG_LEVEL", "INFO").upper()
+
     # JWT auth (Phase 8) -- see docs/Auth_Requirement.md for why this exists
     # at all: Duffel's own Service Agreement requires a closed, authenticated
     # user group, not just "nice to have" API hygiene. No default secret is

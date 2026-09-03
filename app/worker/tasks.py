@@ -12,6 +12,7 @@ than synchronous endpoints.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from typing import Any
 
@@ -21,6 +22,8 @@ from app.agents.flow import TripPlanningFlow
 from app.agents.schemas import ResearchOutput
 from app.tools.audit import get_last_completed_payload, log_stage_event
 from app.worker.celery_app import celery_app
+
+logger = logging.getLogger(__name__)
 
 
 @celery_app.task(name="ping")
@@ -46,6 +49,11 @@ async def _mark_trip_failed(trip_id: str, error: str) -> None:
             session, trip_id, "run_trip_planning_exhausted", payload={"error": error}
         )
         await session.commit()
+    logger.error(
+        "run_trip_planning: all retries exhausted, trip marked FAILED: %s",
+        error,
+        extra={"trip_id": trip_id},
+    )
 
 
 class _TripPlanningTask(Task):  # type: ignore[type-arg]
@@ -106,11 +114,25 @@ def run_trip_planning(self: Task[Any, Any], trip_id: str) -> str:
     without an extra asyncio.run() wrapper here."""
     from app.agents.flow import capture_output_to_log_file
 
+    logger.info(
+        "run_trip_planning: starting (attempt %d/%d)",
+        self.request.retries + 1,
+        (self.max_retries or 0) + 1,
+        extra={"trip_id": trip_id},
+    )
     flow = TripPlanningFlow()
     with capture_output_to_log_file(f"trip_{trip_id}"):
         flow.kickoff(inputs={"trip_id": trip_id})
     if flow.state.error:
+        logger.warning(
+            "run_trip_planning: failed, will retry if attempts remain: %s",
+            flow.state.error,
+            extra={"trip_id": trip_id},
+        )
         raise RuntimeError(flow.state.error)
+    logger.info(
+        "run_trip_planning: succeeded, trip is awaiting_approval", extra={"trip_id": trip_id}
+    )
     return trip_id
 
 
@@ -180,7 +202,13 @@ async def _propose_bookings_for_trip(trip_id: str) -> None:
         await session.commit()
 
     if nothing_proposed:
+        logger.warning(
+            "propose_trip_bookings: nothing could be proposed: %s",
+            flow.state.error,
+            extra={"trip_id": trip_id},
+        )
         raise NoBookingsProposedError(flow.state.error or "No bookings were proposed.")
+    logger.info("propose_trip_bookings: succeeded", extra={"trip_id": trip_id})
 
 
 @celery_app.task(
