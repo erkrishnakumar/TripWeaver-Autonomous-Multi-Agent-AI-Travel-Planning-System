@@ -36,7 +36,7 @@ tripweaver/
 ├── alembic/              # Alembic migration environment + versions
 ├── docs/                 # Design docs, roadmap, incident writeups (see Documentation below)
 │                         #   NOTE: docs/ is intentionally excluded from git — see below
-├── tests/                # Unit + integration tests (223 passing)
+├── tests/                # Unit + integration tests (226 passing)
 ├── .github/workflows/    # CI pipeline (ruff, mypy, pytest)
 ├── .pre-commit-config.yaml  # Local pre-commit hooks (ruff check --fix + ruff format)
 └── docker-compose.yml    # Local Postgres (Phase 5+) and Valkey (Celery broker/backend)
@@ -105,6 +105,13 @@ be there.
      `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
      `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` (default `1440`, i.e. 24h) controls
      how long a token stays valid.
+   - `RESEND_API_KEY` — optional; sends the real `POST /auth/forgot-password`
+     email via [Resend](https://resend.com) (free tier available). Left
+     empty, that endpoint falls back to returning the reset token directly
+     in its response instead — fine for local dev, not how it's meant to
+     work with this set. Resend's free tier (no verified domain) only
+     delivers to the email address your Resend account itself is
+     registered under.
 
 4. Install the pre-commit hooks (runs `ruff check --fix` + `ruff format` on
    every commit):
@@ -244,7 +251,7 @@ disk but are not in the GitHub repo:
 - [x] Phase 5: Postgres persistence — verified live against real Postgres
 - [🟡] Phase 6: observability — `GET /trips/{id}/bookings` and `GET /trips/{id}/audit-log` expose what was previously only visible via a raw DB query. Structured logging (`app/logging_config.py`, every line tagged `[trip=<uuid>]` across the API, worker, and CLI processes) is done and live-verified. Tracing and per-run cost tracking are still open.
 - [x] Phase 7 (v1): agent evals — recorded real LLM/provider failure modes as deterministic regression tests. **Still open**: live-LLM-output-quality evals
-- [x] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, `GET /trips/{id}/bookings`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are all built and live-verified end to end against the real Duffel sandbox. Car rental confirmation is explicitly unsupported pending a card-tokenization frontend (see `docs/Car_Rental_Payment_Gap.md`). **Auth is now built and enforced**: `POST /auth/register`/`login` issue stateless JWT bearer tokens, `POST /auth/forgot-password`/`reset-password` support account recovery (dev-mode token delivery only — no email service is wired up yet), and every trip/approval endpoint requires a token plus checks per-user ownership (see `docs/Auth_Requirement.md`).
+- [x] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, `GET /trips/{id}/bookings`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are all built and live-verified end to end against the real Duffel sandbox. Car rental confirmation is explicitly unsupported pending a card-tokenization frontend (see `docs/Car_Rental_Payment_Gap.md`). **Auth is now built and enforced**: `POST /auth/register`/`login` issue stateless JWT bearer tokens, `POST /auth/forgot-password`/`reset-password` support account recovery with real email delivery via Resend (falls back to returning the token directly only when `RESEND_API_KEY` isn't configured), and every trip/approval endpoint requires a token plus checks per-user ownership (see `docs/Auth_Requirement.md`).
 - [ ] Phase 9: deployment
 
 See `docs/TripWeaver_Roadmap.md` for the full breakdown, including known open items.

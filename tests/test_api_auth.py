@@ -42,6 +42,21 @@ def _jwt_secret(monkeypatch):
     monkeypatch.setattr(settings, "jwt_secret_key", "test-secret-key-not-for-real-use")
 
 
+@pytest.fixture(autouse=True)
+def _no_real_resend_key(monkeypatch):
+    """Forces the dev-mode forgot-password fallback by default, regardless
+    of whatever RESEND_API_KEY happens to be set in the real .env this
+    machine's load_dotenv() picks up. Without this, once a developer adds
+    a real key (e.g. to live-verify real email delivery), the whole test
+    suite silently starts trying to send REAL emails to fake test
+    addresses like jane@example.com -- caught live: Resend correctly
+    rejected those and every dev-mode-path test failed. Tests must never
+    depend on ambient .env state; TestForgotPasswordRealEmailPath's own
+    tests override this back with their own monkeypatch when they
+    specifically want to exercise the real-email path."""
+    monkeypatch.setattr(settings, "resend_api_key", "")
+
+
 @pytest_asyncio.fixture
 async def session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
@@ -310,3 +325,74 @@ class TestForgotAndResetPassword:
             "/auth/reset-password", json={"token": reset_token, "new_password": "short"}
         )
         assert resp.status_code == 422
+
+
+class TestForgotPasswordRealEmailPath:
+    """When RESEND_API_KEY is configured, forgot-password must actually
+    call the email sender instead of falling back to returning the token
+    directly -- these tests mock app.api.main.send_password_reset_email
+    (the same network/external-service boundary this project always mocks,
+    e.g. Duffel calls in tests/test_flights.py), never a real Resend call."""
+
+    async def test_real_email_path_sends_and_omits_token(self, client, monkeypatch):
+        import app.api.main as main_module
+
+        monkeypatch.setattr(settings, "resend_api_key", "re_fake_key_for_testing")
+        sent: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            main_module,
+            "send_password_reset_email",
+            lambda to_email, reset_token: sent.append((to_email, reset_token)),
+        )
+
+        await client.post(
+            "/auth/register", json={"email": "jane@example.com", "password": "originalpass"}
+        )
+        resp = await client.post("/auth/forgot-password", json={"email": "jane@example.com"})
+
+        assert resp.status_code == 200
+        assert resp.json()["reset_token"] is None
+        assert len(sent) == 1
+        assert sent[0][0] == "jane@example.com"
+
+    async def test_email_send_failure_still_returns_generic_success(self, client, monkeypatch):
+        import app.api.main as main_module
+        from app.email.send_email import EmailSendError
+
+        monkeypatch.setattr(settings, "resend_api_key", "re_fake_key_for_testing")
+
+        def _boom(to_email, reset_token):
+            raise EmailSendError("simulated Resend outage")
+
+        monkeypatch.setattr(main_module, "send_password_reset_email", _boom)
+
+        await client.post(
+            "/auth/register", json={"email": "jane@example.com", "password": "originalpass"}
+        )
+        resp = await client.post("/auth/forgot-password", json={"email": "jane@example.com"})
+
+        assert resp.status_code == 200
+        assert resp.json()["reset_token"] is None
+        assert "reset link has been sent" in resp.json()["message"]
+
+    async def test_known_and_unknown_email_get_identical_response(self, client, monkeypatch):
+        """The actual user-enumeration protection: with real email
+        configured, a request for an email that DOES have an account and
+        one that DOESN'T must be indistinguishable to the caller."""
+        import app.api.main as main_module
+
+        monkeypatch.setattr(settings, "resend_api_key", "re_fake_key_for_testing")
+        monkeypatch.setattr(
+            main_module, "send_password_reset_email", lambda to_email, reset_token: None
+        )
+
+        await client.post(
+            "/auth/register", json={"email": "jane@example.com", "password": "originalpass"}
+        )
+        known_resp = await client.post("/auth/forgot-password", json={"email": "jane@example.com"})
+        unknown_resp = await client.post(
+            "/auth/forgot-password", json={"email": "nobody@example.com"}
+        )
+
+        assert known_resp.status_code == unknown_resp.status_code == 200
+        assert known_resp.json() == unknown_resp.json()

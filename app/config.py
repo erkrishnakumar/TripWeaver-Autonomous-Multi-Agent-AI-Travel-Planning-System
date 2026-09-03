@@ -132,6 +132,23 @@ class Settings:
                 'print(secrets.token_urlsafe(32))"`).'
             )
 
+    # Sends the real password-reset email (app/email/send_email.py). No
+    # default sender either -- resend_from_email defaults to their shared
+    # test sender (works immediately, no domain verification) but the API
+    # key itself must be explicit, same "refuse to silently misbehave"
+    # posture as jwt_secret_key/duffel_api_key above.
+    resend_api_key: str = os.environ.get("RESEND_API_KEY", "")
+    resend_from_email: str = os.environ.get(
+        "RESEND_FROM_EMAIL", "TripWeaver <onboarding@resend.dev>"
+    )
+
+    def validate_resend(self) -> None:
+        if not self.resend_api_key:
+            raise RuntimeError(
+                "RESEND_API_KEY is not set. Sign up free at https://resend.com, create an "
+                "API key, and add it to .env."
+            )
+
     def validate_duffel(self) -> None:
         if not self.duffel_api_key:
             raise RuntimeError(

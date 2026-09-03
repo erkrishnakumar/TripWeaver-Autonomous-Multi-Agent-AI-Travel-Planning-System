@@ -100,15 +100,16 @@ class ForgotPasswordRequest(BaseModel):
 
 
 class ForgotPasswordResponse(BaseModel):
-    """reset_token is populated ONLY because no email-sending integration
-    exists yet (see docs/Auth_Requirement.md) -- this is a dev-mode-only
-    delivery mechanism. A real deployment MUST email this value to the
-    user instead of returning it in the HTTP response, and this field
-    should be removed/nulled out the moment that lands, since returning it
-    here means anyone who can call this endpoint can reset anyone's
-    password. message is always the same regardless of whether the email
-    matched a real account, since reset_token itself already reveals that
-    -- there is no user-enumeration protection to preserve in dev mode."""
+    """message is always the same regardless of whether the email matched
+    a real account, or whether the send actually succeeded -- both are
+    real user-enumeration vectors otherwise (see forgot_password()'s own
+    docstring in app/api/main.py).
+
+    reset_token is populated ONLY as a dev-mode fallback when
+    RESEND_API_KEY isn't configured at all (see docs/Auth_Requirement.md)
+    -- when real email delivery is configured, this field is always null,
+    since returning it here would mean anyone who can call this endpoint
+    can reset anyone's password."""
 
     message: str
     reset_token: str | None = None

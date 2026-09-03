@@ -57,6 +57,11 @@ api = [
     # encode/decode, not jose's broader JOSE/JWE/JWK surface -- same
     # narrow-dependency reasoning as choosing bcrypt over passlib above.
     "pyjwt>=2.9",
+    # Sends the real password-reset email (app/email/send_email.py) --
+    # Resend chosen over raw SMTP for a generous free tier and a
+    # dead-simple API-key setup with no domain verification needed to
+    # start (their shared onboarding@resend.dev sender works immediately).
+    "resend>=2.0",
 ]
 
 dev = [

@@ -43,6 +43,7 @@ from app.auth.tokens import create_access_token
 from app.config import settings
 from app.db.models import Approval, AuditLog, Booking, PasswordResetToken, Trip, User
 from app.db.models.enums import TripStatus
+from app.email.send_email import EmailSendError, send_password_reset_email
 from app.logging_config import configure_logging
 from app.tools.confirm_booking import confirm_booking, reject_booking
 from app.tools.create_trip import create_trip
@@ -97,16 +98,29 @@ async def login(body: LoginRequest, db: DbSession) -> TokenResponse:
     return TokenResponse(access_token=create_access_token(str(user.id)))
 
 
+_FORGOT_PASSWORD_GENERIC_MESSAGE = (
+    "If an account with that email exists, a password reset link has been sent."
+)
+
+
 @app.post("/auth/forgot-password", response_model=ForgotPasswordResponse)
 async def forgot_password(body: ForgotPasswordRequest, db: DbSession) -> ForgotPasswordResponse:
-    """Issues a single-use, expiring reset token. See ForgotPasswordResponse's
-    own docstring for why reset_token is returned directly here rather than
-    emailed -- this is a real, tracked, dev-mode-only gap
-    (docs/Auth_Requirement.md), not the intended production behavior."""
+    """Issues a single-use, expiring reset token and emails it via Resend
+    (app/email/send_email.py). Returns the SAME generic message whether or
+    not the email matched a real account, and never reveals whether the
+    email actually sent successfully -- both are real user-enumeration
+    vectors otherwise (a different message, or a different HTTP status on
+    a Resend outage, would let a caller learn which emails have accounts).
+
+    Falls back to returning reset_token directly in the response ONLY when
+    RESEND_API_KEY isn't configured at all (local dev without a Resend
+    account set up) -- see ForgotPasswordResponse's own docstring for why
+    that fallback is explicitly dev-mode-only and unsafe to rely on for
+    any real deployment."""
     result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
     if user is None:
-        return ForgotPasswordResponse(message="No account found with this email.")
+        return ForgotPasswordResponse(message=_FORGOT_PASSWORD_GENERIC_MESSAGE)
 
     raw_token = generate_reset_token()
     reset_token = PasswordResetToken(
@@ -119,10 +133,18 @@ async def forgot_password(body: ForgotPasswordRequest, db: DbSession) -> ForgotP
     db.add(reset_token)
     await db.commit()
     logger.info("Password reset token issued for user %s", user.id)
-    return ForgotPasswordResponse(
-        message="Reset token issued. Use it with POST /auth/reset-password.",
-        reset_token=raw_token,
-    )
+
+    if not settings.resend_api_key:
+        return ForgotPasswordResponse(
+            message=_FORGOT_PASSWORD_GENERIC_MESSAGE, reset_token=raw_token
+        )
+
+    try:
+        send_password_reset_email(user.email, raw_token)
+    except EmailSendError:
+        logger.exception("Failed to send password reset email for user %s", user.id)
+        # Still the generic message -- see this function's own docstring.
+    return ForgotPasswordResponse(message=_FORGOT_PASSWORD_GENERIC_MESSAGE)
 
 
 @app.post("/auth/reset-password", response_model=UserRead)
