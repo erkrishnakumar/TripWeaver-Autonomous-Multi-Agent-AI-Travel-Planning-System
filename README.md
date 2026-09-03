@@ -1,11 +1,13 @@
 # TripWeaver
 
 Autonomous multi-agent travel planning system. CrewAI agents research
-flights, hotels, weather, and visa requirements, run a budget check, and
-sequence a trip itinerary — but **a human must approve every booking before
-anything is ever actually booked.** No path in this codebase lets an LLM
-decide when money moves; only plain, deterministic Python ever writes a
-booking proposal, and only after explicit human approval.
+flights, hotels, car rentals, weather, and visa requirements, run a budget
+check, and sequence a trip itinerary — but **a human must approve every
+booking before anything is ever actually booked, and a real booking only
+ever happens through one explicit, human-triggered endpoint.** No path in
+this codebase lets an LLM decide when money moves; only plain, deterministic
+Python ever writes a booking proposal or calls a real provider endpoint, and
+the latter only after explicit human approval via the API.
 
 ## Architecture
 
@@ -15,22 +17,36 @@ tripweaver/
 │   ├── agents/          # CrewAI Researcher + Planner agents, budget check, Crews, and the
 │   │                    #   Flow that enforces the human-approval gate (Phase 3)
 │   ├── tools/           # Deterministic, typed, independently-tested tool functions (Phase 1)
-│   │   ├── schemas.py   # Pydantic contracts shared by tools/agents/mcp_server/api
-│   │   └── fixtures/    # Local JSON fixtures for USE_MOCK_DATA=true
+│   │   ├── schemas.py           # Pydantic contracts shared by tools/agents/mcp_server/api
+│   │   ├── propose_booking.py   # Gate 1: writes PENDING_APPROVAL, never books for real
+│   │   ├── confirm_booking.py   # Gate 2: the ONLY code path allowed to call a real
+│   │   │                        #   provider booking endpoint (flights/hotels; cars
+│   │   │                        #   are not yet supported here — see docs below)
+│   │   └── fixtures/            # Local JSON fixtures for USE_MOCK_DATA=true
 │   ├── mcp_server/      # FastMCP server exposing the tool layer as MCP tools (Phase 2)
-│   ├── api/             # FastAPI app: trip creation, status, approval gate — not built yet (Phase 8)
-│   ├── db/               # SQLAlchemy models (Trip, Booking, Approval, ...) + session
-│   └── config.py          # Centralized settings (env vars) — see Local setup below
+│   ├── api/             # FastAPI app: trip creation, status, Gate 1 (proceed) and
+│   │                    #   Gate 2 (confirm/reject) endpoints (Phase 8, in progress)
+│   ├── worker/          # Celery tasks (run_trip_planning, propose_trip_bookings) +
+│   │                    #   Celery app config — runs the CrewAI Flow as a background
+│   │                    #   job instead of blocking an HTTP request
+│   ├── auth/            # Password hashing (bcrypt) — auth foundation, not yet wired
+│   │                    #   into any endpoint (see docs/Auth_Requirement.md)
+│   ├── db/              # SQLAlchemy models (Trip, Booking, Approval, ...) + async session
+│   └── config.py        # Centralized settings (env vars) — see Local setup below
 ├── alembic/              # Alembic migration environment + versions
 ├── docs/                 # Design docs, roadmap, incident writeups (see Documentation below)
-├── tests/                # Unit + integration tests (173 passing), including
-│                         #   test_agent_evals.py — Phase 7 regression evals for
-│                         #   real LLM/provider failure modes, and test_auth.py —
-│                         #   the auth foundation (see Status below)
+│                         #   NOTE: docs/ is intentionally excluded from git — see below
+├── tests/                # Unit + integration tests (192 passing)
 ├── .github/workflows/    # CI pipeline (ruff, mypy, pytest)
 ├── .pre-commit-config.yaml  # Local pre-commit hooks (ruff check --fix + ruff format)
-└── docker-compose.yml    # Local Postgres for Phase 5+
+└── docker-compose.yml    # Local Postgres (Phase 5+) and Valkey (Celery broker/backend)
 ```
+
+**A note on `docs/`**: this folder is deliberately excluded from git (see
+`.gitignore`) — every design doc, incident writeup, and verification log in
+it is tracked **locally only**, not pushed to GitHub. This is intentional,
+not an oversight; if you're reading this from a fresh clone, `docs/` won't
+be there.
 
 ## Local setup
 
@@ -41,11 +57,16 @@ tripweaver/
 
 2. Create the virtual environment and install dependencies. The project uses
    optional dependency groups — `agents` (CrewAI), `mcp` (FastMCP), `api`
-   (FastAPI, not yet used), and `dev` (pytest, ruff, mypy, pre-commit).
-   Install everything you'll actually run locally:
+   (FastAPI/uvicorn/bcrypt), `worker` (Celery), and `dev` (pytest, ruff,
+   mypy, pre-commit). Install everything to run the full stack locally:
    ```bash
-   uv sync --extra dev --extra agents --extra mcp
+   uv sync --extra dev --extra agents --extra mcp --extra api --extra worker
    ```
+   CI installs the same set (`.github/workflows/ci.yml`) — a past incident
+   where CI only installed `dev`/`agents`/`mcp` caused mypy to see `fastapi`
+   as an untyped `Any` import and flag every FastAPI route decorator as
+   broken, even though the code was correct. Keep CI's install list matching
+   whatever extras the codebase actually imports.
 
 3. Copy the env template and fill in your Duffel sandbox token:
    ```bash
@@ -54,22 +75,29 @@ tripweaver/
    ```
    Get a free sandbox token: sign up at https://app.duffel.com/join,
    go to Developers → Access tokens → New token (make sure you're in
-   "Developer test mode"). Duffel Stays (hotel search) needs to be enabled
+   "Developer test mode"). Duffel Stays (hotels) and Cars need to be enabled
    separately on the same account.
 
-   Other settings `app/config.py` reads from `.env` (see that file for every
-   option and its default):
-   - `USE_MOCK_DATA=true` — skip real network calls entirely; `search_flights()`
-     and `search_hotels()` read local JSON fixtures instead. Use this for
-     iteration/demos so you don't burn Duffel sandbox rate limits or depend
-     on network access.
-   - `OLLAMA_BASE_URL` / `OLLAMA_MODEL` — the local-first LLM the CrewAI
-     agents (researcher, planner) reason with. Requires a running
-     [Ollama](https://ollama.com/) server.
-   - `GROQ_API_KEY` — only used by `check_visa_requirements()`, a deliberate,
-     narrow exception to the local-first architecture.
-   - `DATABASE_URL` — defaults to the Postgres service in `docker-compose.yml`
-     (`localhost:5435`).
+   Other settings `app/config.py` reads from `.env` (see `.env.example` for
+   every option and its default):
+   - `USE_MOCK_DATA=true` — skip real network calls entirely; `search_flights()`,
+     `search_hotels()`, and `search_car_rentals()` read local JSON fixtures
+     instead. Use this for iteration/demos so you don't burn Duffel sandbox
+     rate limits or depend on network access.
+   - `LLM_PROVIDER` (`ollama` | `groq` | `gemini`) — the default backend the
+     CrewAI researcher/planner agents reason with. Per-task-category
+     overrides (`RESEARCH_FLIGHT_LLM_PROVIDER`, `RESEARCH_CAR_LLM_PROVIDER`,
+     etc.) let you spread calls across multiple providers' free-tier quotas.
+   - `OLLAMA_BASE_URL` / `OLLAMA_MODEL` — used when `LLM_PROVIDER=ollama`.
+     Requires a running [Ollama](https://ollama.com/) server.
+   - `GROQ_API_KEY` / `GEMINI_API_KEY` — used when `LLM_PROVIDER` selects
+     that provider. `GROQ_API_KEY` is also used, independently of
+     `LLM_PROVIDER`, by `check_visa_requirements()` — a deliberate, narrow
+     exception to the local-first architecture.
+   - `DATABASE_URL` — defaults to the Postgres service in
+     `docker-compose.yml` (`localhost:5435`).
+   - `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` — default to the Valkey
+     service in `docker-compose.yml` (`localhost:6380`, DB `0`/`1`).
 
 4. Install the pre-commit hooks (runs `ruff check --fix` + `ruff format` on
    every commit):
@@ -77,9 +105,14 @@ tripweaver/
    uv run pre-commit install
    ```
 
-5. (Optional) Start local Postgres:
+5. Start local Postgres and Valkey:
    ```bash
    docker-compose up -d
+   ```
+
+6. Apply database migrations:
+   ```bash
+   uv run alembic upgrade head
    ```
 
 ## Running things
@@ -89,13 +122,14 @@ Run any tool directly to smoke-test it end to end against the real APIs
 ```bash
 uv run python -m app.tools.flights
 uv run python -m app.tools.hotels
+uv run python -m app.tools.car_rentals
 uv run python -m app.tools.weather
 uv run python -m app.tools.ground_transport
 ```
 
-Run the full CrewAI agent flow (research → budget check → plan → draft trip
-→ human approval prompt → propose bookings) — requires a running Ollama
-server:
+Run the full CrewAI agent flow directly (research → budget check → plan →
+draft trip → CLI approval prompt → propose bookings) — requires a running
+Ollama server (or another configured `LLM_PROVIDER`):
 ```bash
 uv run python -m app.agents.flow
 ```
@@ -103,6 +137,22 @@ uv run python -m app.agents.flow
 Run the MCP server as a standalone process:
 ```bash
 uv run python -m app.mcp_server.server
+```
+
+Run the full async stack (API + background worker) — this is the real,
+non-CLI path: a trip's research/planning runs as a Celery background job,
+and a human approves via HTTP rather than a blocking terminal prompt:
+```bash
+uv run uvicorn app.api.main:app --reload
+uv run celery -A app.worker.celery_app worker --loglevel=info   # separate terminal
+```
+Then:
+```bash
+curl -X POST http://localhost:8000/trips -H "Content-Type: application/json" -d '{...}'
+# ... trip researches/plans in the background, lands in AWAITING_APPROVAL ...
+curl -X POST http://localhost:8000/trips/{trip_id}/proceed              # Gate 1: propose bookings
+curl -X POST http://localhost:8000/approvals/{approval_id}/confirm -d '{...}'  # Gate 2: real booking
+curl -X POST http://localhost:8000/approvals/{approval_id}/reject -d '{...}'   # or reject
 ```
 
 ## Tests
@@ -132,25 +182,36 @@ a real mypy/CI incident and fix.
 
 ## Documentation
 
+`docs/` is tracked locally only (see the note above) — these files exist on
+disk but are not in the GitHub repo:
+
 - `docs/TripWeaver_Roadmap.md` — phase-by-phase project status, what's done, what's open
+- `docs/Flight_And_Hotel_Real_Booking_Documentation.md` — live sandbox verification of `create_flight_order()`/`create_hotel_booking()`
+- `docs/Car_Rentals_Documentation.md` — the Duffel Cars rollout: search/quote/book contract, real bugs found
+- `docs/Car_Rental_Payment_Gap.md` — why car rental bookings can't be confirmed yet (Duffel requires a tokenized card; no frontend exists) and the full resolution plan
+- `docs/Gate2_Live_Verification.md` — live end-to-end verification of `confirm_booking()`/`reject_booking()` against the real Duffel sandbox
+- `docs/Multi_Car_Rental_Extension.md` — design for supporting more than one car rental per trip (not yet built)
+- `docs/Auth_Requirement.md` — why authentication is a standing compliance requirement (Duffel's own service agreement), and what's built so far
 - `docs/MCP_Server_Documentation.md` — MCP server design rationale
+- `docs/TripWeaver_Two_Layer_Testing_and_CI.md` — the two-layer testing/CI system, how it's structured
 - `docs/pytest_Documentation.md` — testing conventions used in this repo
 - `docs/CI_Mypy_Ruff_Rationale.md` — why CI/mypy/ruff exist and what they catch
 - `docs/Mypy_Documentation.md` — a real mypy/CI incident, root cause, and fix
 - `app/agents/README.md` — CrewAI agent architecture, the human-approval-gate design, and testing approach
+- `app/api/README.md` — FastAPI layer design notes
 
 ## Status
 
 - [x] Phase 0: repo scaffold, schemas
-- [x] Phase 1: tool layer (`search_flights`, `get_weather_forecast`, `search_hotels`, `check_visa_requirements`, `propose_booking`/`create_trip`)
-- [x] Phase 2: MCP server wrapping
+- [x] Phase 1: tool layer (`search_flights`, `get_weather_forecast`, `search_hotels`, `search_car_rentals`, `check_visa_requirements`, `propose_booking`/`create_trip`)
+- [x] Phase 2: MCP server wrapping (11 tools)
 - [x] Phase 2.1: ground transport cost estimation
 - [x] Phase 3: CrewAI agents + Flow with human-approval gate
-- [ ] Phase 4: real confirm/reject API endpoint (propose_booking() itself is done; see Phase 8)
-- [x] Phase 5: Postgres persistence — models done and tested; real Postgres round-trip verified live (2026-08-30)
+- [x] Phase 4: Gate 1 (`propose_booking()` + `POST /trips/{id}/proceed`) — done and live-verified
+- [x] Phase 5: Postgres persistence — verified live against real Postgres
 - [ ] Phase 6: observability
-- [x] Phase 7 (v1): agent evals — `tests/test_agent_evals.py` encodes real observed LLM/provider failure modes (hallucinated/placeholder ids, empty-dict "nothing found", provider rate-limit crashes, missing-input hotel search) as deterministic regression tests. **Still open**: live-LLM-output-quality evals against a real/recorded provider — see `docs/TripWeaver_Roadmap.md`
-- [ ] Phase 8: API layer — auth foundation started ahead of this phase: `User` model, bcrypt password hashing, nullable `Trip.user_id` FK — see `docs/Auth_Requirement.md`. Login endpoint, session/token issuance, and auth middleware are still open, and are properly Phase 8 work
+- [x] Phase 7 (v1): agent evals — recorded real LLM/provider failure modes as deterministic regression tests. **Still open**: live-LLM-output-quality evals
+- [🟡] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are built and live-verified for flights/hotels against the real Duffel sandbox. Car rental confirmation is explicitly unsupported pending a card-tokenization frontend (see `docs/Car_Rental_Payment_Gap.md`). Auth (login endpoint, session/token issuance, middleware) is still fully open — the foundation (`User` model, bcrypt hashing) exists but nothing is wired up yet.
 - [ ] Phase 9: deployment
 
 See `docs/TripWeaver_Roadmap.md` for the full breakdown, including known open items.
