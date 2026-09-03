@@ -436,3 +436,21 @@ class TestCrewPromptSafeguards:
         assert note not in hotel_task.description
         assert note not in context_task.description
         assert note not in format_task.description
+
+    def test_gather_tasks_warn_against_answering_from_memory(self):
+        """Regression test for a real incident (2026-09-03): a live run on
+        qwen3:14b produced a fully fabricated research_completed payload --
+        placeholder-shaped ids (FL123456, HOT789012, CAR112233) AND every
+        date stamped 2023 instead of the requested 2026 trip, meaning the
+        model answered from memorized "what a typical offer looks like"
+        knowledge instead of actually using its tool's real response. The
+        hallucination guard (re-fetch by id before ever proposing a
+        booking) still caught it downstream, but this pins the prompt-level
+        defense added at the source: flight/hotel/car_rental tasks must all
+        warn against this specific failure mode, not just "don't invent an
+        offer" generically."""
+        crew = crew_module.build_research_crew("JFK -> ATL, departing 2026-09-27")
+        flight_task, hotel_task, car_rental_task, context_task, format_task = crew.tasks
+        for task in (flight_task, hotel_task, car_rental_task):
+            assert "prior knowledge" in task.description.lower()
+            assert "different year" in task.description.lower()

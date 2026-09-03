@@ -26,17 +26,20 @@ class AuditLog(Base):
 
     id: Mapped[uuid.UUID] = uuid_pk()
 
-    # A monotonically increasing tiebreaker for ordering, generated in
-    # Python via time.monotonic_ns() -- created_at (wall-clock) isn't
-    # reliable for this (verified live: two writes within the same tick
-    # got identical timestamps on Windows). Deliberately NOT a DB identity/
-    # sequence column (tried that, hit a real SQLite-vs-Postgres DDL
+    # A monotonically increasing per-trip tiebreaker for ordering, computed
+    # in app/tools/audit.py's log_stage_event() as a plain Python
+    # MAX(sequence)+1 query -- see that function's own docstring for the
+    # full story. NEITHER created_at (wall-clock) NOR time.monotonic_ns()
+    # turned out reliable for this: both returned IDENTICAL values for two
+    # back-to-back writes, verified live (Windows clock resolution is
+    # coarser than either name implies). Deliberately NOT a DB identity/
+    # sequence column either (tried that, hit a real SQLite-vs-Postgres DDL
     # incompatibility -- SQLite has no equivalent for a non-PK column).
-    # time.monotonic_ns() is only guaranteed increasing WITHIN one
-    # process, not globally across workers -- acceptable here because a
-    # single trip's audit events are always written sequentially by
-    # whichever one worker is currently processing that trip, never
-    # concurrently by two workers for the same trip_id.
+    # A per-trip MAX+1 is only safe because one trip's audit events are
+    # always written sequentially by whichever single worker is currently
+    # processing that trip, never concurrently by two workers for the same
+    # trip_id -- see log_stage_event()'s docstring for what would need to
+    # change if that invariant is ever violated.
     sequence: Mapped[int] = mapped_column(
         BigInteger,
         nullable=False,

@@ -36,7 +36,7 @@ tripweaver/
 ├── alembic/              # Alembic migration environment + versions
 ├── docs/                 # Design docs, roadmap, incident writeups (see Documentation below)
 │                         #   NOTE: docs/ is intentionally excluded from git — see below
-├── tests/                # Unit + integration tests (206 passing)
+├── tests/                # Unit + integration tests (214 passing)
 ├── .github/workflows/    # CI pipeline (ruff, mypy, pytest)
 ├── .pre-commit-config.yaml  # Local pre-commit hooks (ruff check --fix + ruff format)
 └── docker-compose.yml    # Local Postgres (Phase 5+) and Valkey (Celery broker/backend)
@@ -166,6 +166,7 @@ curl -X POST http://localhost:8000/trips $AUTH -H "Content-Type: application/jso
 # ... trip researches/plans in the background, lands in AWAITING_APPROVAL ...
 curl -X POST http://localhost:8000/trips/{trip_id}/proceed $AUTH        # Gate 1: propose bookings
 curl http://localhost:8000/trips/{trip_id}/bookings $AUTH               # find the approval_id(s) to act on
+curl http://localhost:8000/trips/{trip_id}/audit-log $AUTH              # see everything that happened to this trip
 curl -X POST http://localhost:8000/approvals/{approval_id}/confirm $AUTH -d '{...}'  # Gate 2: real booking
 curl -X POST http://localhost:8000/approvals/{approval_id}/reject $AUTH -d '{...}'   # or reject
 ```
@@ -241,7 +242,7 @@ disk but are not in the GitHub repo:
 - [x] Phase 3: CrewAI agents + Flow with human-approval gate
 - [x] Phase 4: Gate 1 + Gate 2 (`propose_booking()`/`confirm_booking()`/`reject_booking()`) — done, live-verified against the real Duffel sandbox **through the actual running HTTP API**, not just direct function calls (real flight order, reference `VFZC6E`)
 - [x] Phase 5: Postgres persistence — verified live against real Postgres
-- [ ] Phase 6: observability
+- [🟡] Phase 6: observability — `GET /trips/{id}/bookings` and `GET /trips/{id}/audit-log` expose what was previously only visible via a raw DB query. Structured logging, tracing, and per-run cost tracking are still open.
 - [x] Phase 7 (v1): agent evals — recorded real LLM/provider failure modes as deterministic regression tests. **Still open**: live-LLM-output-quality evals
 - [x] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, `GET /trips/{id}/bookings`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are all built and live-verified end to end against the real Duffel sandbox. Car rental confirmation is explicitly unsupported pending a card-tokenization frontend (see `docs/Car_Rental_Payment_Gap.md`). **Auth is now built and enforced**: `POST /auth/register`/`login` issue stateless JWT bearer tokens, and every trip/approval endpoint requires one plus checks per-user ownership (see `docs/Auth_Requirement.md`).
 - [ ] Phase 9: deployment

@@ -118,7 +118,15 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
             "Report the winning offer's full details exactly as the tool returned "
             "them (offer_id, price, cabin class, every segment, expires_at). If no "
             "offer was found or none fit the budget, say so explicitly instead of "
-            "guessing."
+            "guessing.\n\n"
+            "You MUST actually call the tool and copy its real JSON response — "
+            "never answer from what a typical flight offer looks like based on "
+            "prior knowledge. A reliable check: every date you report (departure, "
+            "arrival, expires_at) must fall on or after the trip request's own "
+            "departure date above. If any date you're about to report is from a "
+            "different year than the trip request, you have NOT used the tool's "
+            "real output — call the tool again and report what it actually "
+            "returned."
         ),
         expected_output=(
             "A plain-text report of the single best flight offer with all its "
@@ -140,7 +148,13 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
             "When you call the tool, include EVERY one of its parameters in the "
             "call explicitly — pass null for any you don't need rather than "
             "omitting them. Some providers reject a tool call outright if any "
-            "optional parameter is left out entirely."
+            "optional parameter is left out entirely.\n\n"
+            "You MUST actually call the tool and copy its real JSON response — "
+            "never answer from what a typical hotel listing looks like based on "
+            "prior knowledge. A reliable check: the check-in date you report must "
+            "match the trip request's own check-in date above. If it's from a "
+            "different year, you have NOT used the tool's real output — call the "
+            "tool again and report what it actually returned."
         ),
         expected_output=(
             "A plain-text report of the single best hotel listing with all its "
@@ -168,7 +182,13 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
             "When you call the tool, include EVERY one of its parameters in the "
             "call explicitly — pass null for any you don't need rather than "
             "omitting them. Some providers reject a tool call outright if any "
-            "optional parameter is left out entirely."
+            "optional parameter is left out entirely.\n\n"
+            "You MUST actually call the tool and copy its real JSON response — "
+            "never answer from what a typical car rental listing looks like based "
+            "on prior knowledge. A reliable check: the pickup date you report must "
+            "match the trip request's own dates above. If it's from a different "
+            "year, you have NOT used the tool's real output — call the tool again "
+            "and report what it actually returned."
             + (f"\n\n{car_rental_override}" if car_rental_override else "")
         ),
         expected_output=(

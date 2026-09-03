@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -100,6 +101,22 @@ class UserRead(BaseModel):
     id: uuid.UUID
     email: str
     is_active: bool
+
+
+class AuditLogEntryRead(BaseModel):
+    """One event from a trip's audit trail -- the same append-only record
+    app/tools/audit.py's log_stage_event() has always written (research_
+    started/completed/failed, booking.proposed/confirmed/rejected/failed,
+    etc.). This is the first place any of it is exposed over HTTP; before
+    this endpoint, seeing a trip's history meant a raw DB query."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    sequence: int
+    event_type: str
+    payload: dict[str, Any]
+    booking_id: uuid.UUID | None
+    created_at: datetime
 
 
 class BookingRead(BaseModel):

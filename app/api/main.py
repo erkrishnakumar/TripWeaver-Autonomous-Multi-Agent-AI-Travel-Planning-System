@@ -20,6 +20,7 @@ from sqlalchemy.orm import selectinload
 from app.api.deps import get_current_user, get_db
 from app.api.schemas import (
     ApprovalDecisionResponse,
+    AuditLogEntryRead,
     BookingRead,
     ConfirmApprovalRequest,
     LoginRequest,
@@ -33,7 +34,7 @@ from app.api.schemas import (
 )
 from app.auth.passwords import PasswordTooLongError, hash_password, verify_password
 from app.auth.tokens import create_access_token
-from app.db.models import Approval, Booking, Trip, User
+from app.db.models import Approval, AuditLog, Booking, Trip, User
 from app.db.models.enums import TripStatus
 from app.tools.confirm_booking import confirm_booking, reject_booking
 from app.tools.create_trip import create_trip
@@ -150,6 +151,25 @@ async def list_trip_bookings(
             )
         )
     return read_rows
+
+
+@app.get("/trips/{trip_id}/audit-log", response_model=list[AuditLogEntryRead])
+async def get_trip_audit_log(
+    trip_id: uuid.UUID, db: DbSession, current_user: CurrentUser
+) -> list[AuditLog]:
+    """A trip's full event history -- research_started/completed/failed,
+    budget_checked, booking.proposed/confirmed/rejected/failed, etc. This
+    data has always existed (app/tools/audit.py's log_stage_event() has
+    written it since Phase 8's Celery work began); this is the first place
+    it's exposed over HTTP rather than requiring a raw DB query, closing
+    the same class of gap GET /trips/{id}/bookings closed for approvals."""
+    trip = await db.get(Trip, trip_id)
+    _trip_or_404(trip, current_user)
+
+    result = await db.execute(
+        select(AuditLog).where(AuditLog.trip_id == trip_id).order_by(AuditLog.sequence)
+    )
+    return list(result.scalars().all())
 
 
 @app.post("/trips/{trip_id}/proceed", response_model=TripProceedResponse)
