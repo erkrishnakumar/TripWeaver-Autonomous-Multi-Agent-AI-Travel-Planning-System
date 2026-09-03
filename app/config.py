@@ -98,6 +98,25 @@ class Settings:
         os.environ.get("GROUND_TRANSPORT_MIN_FARE_USD", "3.0")
     )
 
+    # JWT auth (Phase 8) -- see docs/Auth_Requirement.md for why this exists
+    # at all: Duffel's own Service Agreement requires a closed, authenticated
+    # user group, not just "nice to have" API hygiene. No default secret is
+    # provided on purpose -- validate_jwt() below refuses to start without
+    # one, rather than silently signing tokens with a guessable value.
+    jwt_secret_key: str = os.environ.get("JWT_SECRET_KEY", "")
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = int(
+        os.environ.get("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440")
+    )
+
+    def validate_jwt(self) -> None:
+        if not self.jwt_secret_key:
+            raise RuntimeError(
+                "JWT_SECRET_KEY is not set. Copy .env.example to .env and set it to a "
+                'long random value (e.g. `python -c "import secrets; '
+                'print(secrets.token_urlsafe(32))"`).'
+            )
+
     def validate_duffel(self) -> None:
         if not self.duffel_api_key:
             raise RuntimeError(

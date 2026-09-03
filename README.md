@@ -36,7 +36,7 @@ tripweaver/
 ├── alembic/              # Alembic migration environment + versions
 ├── docs/                 # Design docs, roadmap, incident writeups (see Documentation below)
 │                         #   NOTE: docs/ is intentionally excluded from git — see below
-├── tests/                # Unit + integration tests (192 passing)
+├── tests/                # Unit + integration tests (206 passing)
 ├── .github/workflows/    # CI pipeline (ruff, mypy, pytest)
 ├── .pre-commit-config.yaml  # Local pre-commit hooks (ruff check --fix + ruff format)
 └── docker-compose.yml    # Local Postgres (Phase 5+) and Valkey (Celery broker/backend)
@@ -98,6 +98,13 @@ be there.
      `docker-compose.yml` (`localhost:5435`).
    - `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` — default to the Valkey
      service in `docker-compose.yml` (`localhost:6380`, DB `0`/`1`).
+   - `JWT_SECRET_KEY` — **required** before `POST /auth/login` or any other
+     endpoint (everything except `/health`, `/auth/register`, `/auth/login`)
+     will work; the app refuses to sign/verify a token with an empty
+     secret. Generate one with
+     `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+     `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` (default `1440`, i.e. 24h) controls
+     how long a token stays valid.
 
 4. Install the pre-commit hooks (runs `ruff check --fix` + `ruff format` on
    every commit):
@@ -146,18 +153,30 @@ and a human approves via HTTP rather than a blocking terminal prompt:
 uv run uvicorn app.api.main:app --reload
 uv run celery -A app.worker.celery_app worker --loglevel=info   # separate terminal
 ```
-Then:
+Then, register a user and log in — every endpoint below requires the
+resulting bearer token (`Authorization: Bearer <access_token>`):
 ```bash
-curl -X POST http://localhost:8000/trips -H "Content-Type: application/json" -d '{...}'
-# ... trip researches/plans in the background, lands in AWAITING_APPROVAL ...
-curl -X POST http://localhost:8000/trips/{trip_id}/proceed              # Gate 1: propose bookings
-curl http://localhost:8000/trips/{trip_id}/bookings                     # find the approval_id(s) to act on
-curl -X POST http://localhost:8000/approvals/{approval_id}/confirm -d '{...}'  # Gate 2: real booking
-curl -X POST http://localhost:8000/approvals/{approval_id}/reject -d '{...}'   # or reject
+curl -X POST http://localhost:8000/auth/register -H "Content-Type: application/json" -d '{"email":"jane@example.com","password":"correcthorse"}'
+curl -X POST http://localhost:8000/auth/login    -H "Content-Type: application/json" -d '{"email":"jane@example.com","password":"correcthorse"}'
+# -> {"access_token": "...", "token_type": "bearer"}
 ```
-This entire sequence is live-verified against the real Duffel sandbox
-through the actual running API (not just as direct function calls) — see
-`docs/Gate2_Live_Verification.md` §5.
+```bash
+AUTH='-H "Authorization: Bearer <access_token>"'
+curl -X POST http://localhost:8000/trips $AUTH -H "Content-Type: application/json" -d '{...}'
+# ... trip researches/plans in the background, lands in AWAITING_APPROVAL ...
+curl -X POST http://localhost:8000/trips/{trip_id}/proceed $AUTH        # Gate 1: propose bookings
+curl http://localhost:8000/trips/{trip_id}/bookings $AUTH               # find the approval_id(s) to act on
+curl -X POST http://localhost:8000/approvals/{approval_id}/confirm $AUTH -d '{...}'  # Gate 2: real booking
+curl -X POST http://localhost:8000/approvals/{approval_id}/reject $AUTH -d '{...}'   # or reject
+```
+Every trip/approval endpoint also checks **ownership**, not just that a
+token is valid — a trip or approval belonging to a different user (or with
+no owner at all) 404s rather than 401s, so its existence is never confirmed
+to someone who doesn't own it.
+
+The Gate 1 → Gate 2 sequence itself is live-verified against the real
+Duffel sandbox through the actual running API (not just as direct function
+calls) — see `docs/Gate2_Live_Verification.md` §5.
 
 **Windows note**: if you restart the Celery worker (e.g. to change env
 vars), verify only one is left running with
@@ -224,7 +243,7 @@ disk but are not in the GitHub repo:
 - [x] Phase 5: Postgres persistence — verified live against real Postgres
 - [ ] Phase 6: observability
 - [x] Phase 7 (v1): agent evals — recorded real LLM/provider failure modes as deterministic regression tests. **Still open**: live-LLM-output-quality evals
-- [x] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, `GET /trips/{id}/bookings`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are all built and live-verified end to end against the real Duffel sandbox. Car rental confirmation is explicitly unsupported pending a card-tokenization frontend (see `docs/Car_Rental_Payment_Gap.md`). Auth (login endpoint, session/token issuance, middleware) is still fully open — the foundation (`User` model, bcrypt hashing) exists but nothing is wired up yet.
+- [x] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, `GET /trips/{id}/bookings`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are all built and live-verified end to end against the real Duffel sandbox. Car rental confirmation is explicitly unsupported pending a card-tokenization frontend (see `docs/Car_Rental_Payment_Gap.md`). **Auth is now built and enforced**: `POST /auth/register`/`login` issue stateless JWT bearer tokens, and every trip/approval endpoint requires one plus checks per-user ownership (see `docs/Auth_Requirement.md`).
 - [ ] Phase 9: deployment
 
 See `docs/TripWeaver_Roadmap.md` for the full breakdown, including known open items.

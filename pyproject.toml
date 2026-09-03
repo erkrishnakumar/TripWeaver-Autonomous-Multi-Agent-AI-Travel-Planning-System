@@ -52,6 +52,11 @@ api = [
     # abstraction. Ships its own py.typed marker, so no separate stub
     # package is needed for mypy --strict.
     "bcrypt>=4.1",
+    # JWT issuance/verification for the login endpoint (app/auth/tokens.py).
+    # PyJWT directly, not python-jose: this project only needs HS256
+    # encode/decode, not jose's broader JOSE/JWE/JWK surface -- same
+    # narrow-dependency reasoning as choosing bcrypt over passlib above.
+    "pyjwt>=2.9",
 ]
 
 dev = [

@@ -38,6 +38,7 @@ async def create_trip(
     max_budget_usd: float | None = None,
     requester_email: str | None = None,
     wants_car_rental: bool = False,
+    user_id: uuid.UUID | None = None,
 ) -> Trip:
     """Create and persist a new Trip row in DRAFT status.
 
@@ -58,6 +59,7 @@ async def create_trip(
         max_budget_usd=max_budget_usd,
         requester_email=requester_email,
         wants_car_rental=wants_car_rental,
+        user_id=user_id,
         status=TripStatus.DRAFT,
     )
     session.add(trip)

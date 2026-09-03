@@ -17,17 +17,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import get_db
+from app.api.deps import get_current_user, get_db
 from app.api.schemas import (
     ApprovalDecisionResponse,
     BookingRead,
     ConfirmApprovalRequest,
+    LoginRequest,
+    RegisterRequest,
     RejectApprovalRequest,
+    TokenResponse,
     TripCreate,
     TripProceedResponse,
     TripRead,
+    UserRead,
 )
-from app.db.models import Booking, Trip
+from app.auth.passwords import PasswordTooLongError, hash_password, verify_password
+from app.auth.tokens import create_access_token
+from app.db.models import Approval, Booking, Trip, User
 from app.db.models.enums import TripStatus
 from app.tools.confirm_booking import confirm_booking, reject_booking
 from app.tools.create_trip import create_trip
@@ -36,24 +42,66 @@ from app.worker.tasks import propose_trip_bookings, run_trip_planning
 
 app = FastAPI(title="TripWeaver API")
 
+CurrentUser = Annotated[User, Depends(get_current_user)]
+DbSession = Annotated[AsyncSession, Depends(get_db)]
+
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/trips/{trip_id}", response_model=TripRead)
-async def get_trip(trip_id: uuid.UUID, db: Annotated[AsyncSession, Depends(get_db)]) -> Trip:
-    trip = await db.get(Trip, trip_id)
-    if trip is None:
+@app.post("/auth/register", response_model=UserRead, status_code=201)
+async def register(body: RegisterRequest, db: DbSession) -> User:
+    """Deliberately open self-registration, not invite-only -- Duffel's
+    "closed user group" requirement (see docs/Auth_Requirement.md) means
+    every request must come from an authenticated, identifiable user, not
+    that account creation itself must be gated. Every OTHER endpoint below
+    requires a valid token; this and /auth/login are the only public ones."""
+    existing = await db.execute(select(User).where(User.email == body.email))
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+
+    try:
+        hashed = hash_password(body.password)
+    except PasswordTooLongError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    user = User(id=uuid.uuid4(), email=body.email, hashed_password=hashed)
+    db.add(user)
+    await db.commit()
+    return user
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(body: LoginRequest, db: DbSession) -> TokenResponse:
+    result = await db.execute(select(User).where(User.email == body.email))
+    user = result.scalar_one_or_none()
+    invalid_credentials = HTTPException(status_code=401, detail="Incorrect email or password.")
+    if user is None or not verify_password(body.password, user.hashed_password):
+        raise invalid_credentials
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="This account has been deactivated.")
+    return TokenResponse(access_token=create_access_token(str(user.id)))
+
+
+def _trip_or_404(trip: Trip | None, current_user: User) -> Trip:
+    """A trip that exists but belongs to someone else returns the same 404
+    as a trip that doesn't exist at all -- never confirm to a caller that a
+    given trip_id belongs to another user."""
+    if trip is None or trip.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Trip not found")
     return trip
 
 
+@app.get("/trips/{trip_id}", response_model=TripRead)
+async def get_trip(trip_id: uuid.UUID, db: DbSession, current_user: CurrentUser) -> Trip:
+    trip = await db.get(Trip, trip_id)
+    return _trip_or_404(trip, current_user)
+
+
 @app.post("/trips", response_model=TripRead, status_code=201)
-async def create_trip_endpoint(
-    body: TripCreate, db: Annotated[AsyncSession, Depends(get_db)]
-) -> Trip:
+async def create_trip_endpoint(body: TripCreate, db: DbSession, current_user: CurrentUser) -> Trip:
     trip = await create_trip(
         db,
         origin_iata=body.origin_iata,
@@ -64,6 +112,7 @@ async def create_trip_endpoint(
         max_budget_usd=body.max_budget_usd,
         requester_email=body.requester_email,
         wants_car_rental=body.wants_car_rental,
+        user_id=current_user.id,
     )
     await db.commit()
     run_trip_planning.delay(str(trip.id))
@@ -72,15 +121,14 @@ async def create_trip_endpoint(
 
 @app.get("/trips/{trip_id}/bookings", response_model=list[BookingRead])
 async def list_trip_bookings(
-    trip_id: uuid.UUID, db: Annotated[AsyncSession, Depends(get_db)]
+    trip_id: uuid.UUID, db: DbSession, current_user: CurrentUser
 ) -> list[BookingRead]:
     """What a human approver actually looks at: every Booking proposed for
     this trip, with its Approval decision inlined, so approval_id (needed
     for POST /approvals/{id}/confirm|reject) never has to be dug out of the
     database directly."""
     trip = await db.get(Trip, trip_id)
-    if trip is None:
-        raise HTTPException(status_code=404, detail="Trip not found")
+    _trip_or_404(trip, current_user)
 
     result = await db.execute(
         select(Booking).where(Booking.trip_id == trip_id).options(selectinload(Booking.approval))
@@ -106,11 +154,9 @@ async def list_trip_bookings(
 
 @app.post("/trips/{trip_id}/proceed", response_model=TripProceedResponse)
 async def proceed_with_trip(
-    trip_id: uuid.UUID, db: Annotated[AsyncSession, Depends(get_db)]
+    trip_id: uuid.UUID, db: DbSession, current_user: CurrentUser
 ) -> TripProceedResponse:
-    trip = await db.get(Trip, trip_id)
-    if trip is None:
-        raise HTTPException(status_code=404, detail="Trip not found")
+    trip = _trip_or_404(await db.get(Trip, trip_id), current_user)
     if trip.status != TripStatus.AWAITING_APPROVAL:
         raise HTTPException(
             status_code=409,
@@ -138,11 +184,33 @@ def _raise_for_tool_error(error: ToolError) -> NoReturn:
     raise HTTPException(status_code=422, detail=error.message)
 
 
+async def _require_own_approval(
+    db: AsyncSession, approval_id: uuid.UUID, current_user: User
+) -> None:
+    """Same not-found-not-forbidden discipline as _trip_or_404, one join
+    deeper: Approval -> Booking -> Trip.user_id. Deliberately checked here
+    at the API layer, not inside confirm_booking()/reject_booking()
+    themselves -- those stay auth-agnostic and reusable (e.g. from a future
+    CLI/admin tool with no concept of "the current HTTP user"), same
+    separation of concerns as propose_booking() never importing anything
+    from app/api/."""
+    result = await db.execute(
+        select(Trip.user_id)
+        .join(Booking, Booking.trip_id == Trip.id)
+        .join(Approval, Approval.booking_id == Booking.id)
+        .where(Approval.id == approval_id)
+    )
+    owner_id = result.scalar_one_or_none()
+    if owner_id is None or owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Approval not found")
+
+
 @app.post("/approvals/{approval_id}/confirm", response_model=ApprovalDecisionResponse)
 async def confirm_approval(
     approval_id: uuid.UUID,
     body: ConfirmApprovalRequest,
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: DbSession,
+    current_user: CurrentUser,
 ) -> ApprovalDecisionResponse:
     """Gate 2. THE ONLY endpoint in this project ever allowed to trigger a
     real provider booking -- see app/tools/confirm_booking.py's module
@@ -150,6 +218,7 @@ async def confirm_approval(
     comes back as a normal 200 (booking_status="booking_failed") rather
     than an HTTP error: the human's approval succeeded, Duffel's booking
     call is a separate, honestly-reported outcome."""
+    await _require_own_approval(db, approval_id, current_user)
     result = await confirm_booking(
         db,
         str(approval_id),
@@ -174,8 +243,10 @@ async def confirm_approval(
 async def reject_approval(
     approval_id: uuid.UUID,
     body: RejectApprovalRequest,
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: DbSession,
+    current_user: CurrentUser,
 ) -> ApprovalDecisionResponse:
+    await _require_own_approval(db, approval_id, current_user)
     result = await reject_booking(
         db,
         str(approval_id),

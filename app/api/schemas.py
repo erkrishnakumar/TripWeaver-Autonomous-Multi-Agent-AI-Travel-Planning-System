@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.db.models.enums import ApprovalDecision, BookingStatus, BookingType, TripStatus
 from app.tools.schemas import HotelGuestDetails, PassengerDetails
@@ -77,6 +77,29 @@ class ApprovalDecisionResponse(BaseModel):
     booking_status: str
     provider_booking_reference: str | None = None
     message: str
+
+
+class RegisterRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=320)
+    password: str = Field(..., min_length=8)
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class UserRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    email: str
+    is_active: bool
 
 
 class BookingRead(BaseModel):

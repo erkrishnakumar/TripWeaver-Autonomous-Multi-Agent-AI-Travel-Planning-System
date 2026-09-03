@@ -5058,6 +5058,7 @@ agents = [
 api = [
     { name = "bcrypt" },
     { name = "fastapi" },
+    { name = "pyjwt" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 dev = [
@@ -5092,6 +5093,7 @@ requires-dist = [
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.1" },
     { name = "pydantic", specifier = ">=2.7" },
+    { name = "pyjwt", marker = "extra == 'api'", specifier = ">=2.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pytest-httpx", marker = "extra == 'dev'", specifier = ">=0.30" },
