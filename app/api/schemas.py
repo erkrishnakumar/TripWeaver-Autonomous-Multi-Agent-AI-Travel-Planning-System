@@ -52,18 +52,21 @@ class ConfirmApprovalRequest(BaseModel):
     """Body for POST /approvals/{id}/confirm — Gate 2.
 
     This is the first and only point in the entire API where real
-    passenger/guest PII is ever submitted; see confirm_booking()'s own
-    docstring for why it is never collected or persisted any earlier.
-    Provide `passengers` for a flight booking, or `guests` +
-    `contact_email` + `contact_phone_number` for a hotel booking — whichever
-    matches the booking this approval is for. Car rental approvals cannot
-    be confirmed yet (see docs/Car_Rental_Payment_Gap.md).
+    passenger/guest PII (and, for a car rental, a payment token) is ever
+    submitted; see confirm_booking()'s own docstring for why it is never
+    collected or persisted any earlier. Provide `passengers` for a flight
+    booking, `guests` + `contact_email` + `contact_phone_number` for a
+    hotel booking, or `three_d_secure_session_id` for a car rental booking
+    (obtained client-side via GET /car-rentals/component-client-key +
+    Duffel's card-tokenization flow — see docs/Car_Rental_Payment_Gap.md) —
+    whichever matches the booking this approval is for.
     """
 
     passengers: list[PassengerDetails] | None = None
     guests: list[HotelGuestDetails] | None = None
     contact_email: str | None = None
     contact_phone_number: str | None = None
+    three_d_secure_session_id: str | None = None
     decided_by: str | None = None
 
 
@@ -121,6 +124,10 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=8)
 
 
+class UpdateMeRequest(BaseModel):
+    full_name: str | None = Field(None, min_length=1, max_length=200)
+
+
 class UserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -174,9 +181,23 @@ class ConfirmInfoResponse(BaseModel):
     are LIVE re-fetched from the provider (same hallucination-guard
     discipline confirm_booking() itself uses), not read from a
     possibly-stale cached value, so they're guaranteed valid to use
-    immediately."""
+    immediately. car_quote_id (car bookings only, also live re-fetched) is
+    the resourceId the frontend's Duffel 3DS-session call needs -- see
+    docs/Car_Rental_Payment_Gap.md."""
 
     booking_type: BookingType
     approval_id: uuid.UUID
     passenger_ids: list[str] | None = None
+    car_quote_id: str | None = None
     note: str
+
+
+class ComponentClientKeyResponse(BaseModel):
+    """Authorizes Duffel's browser-side card-tokenization form
+    (DuffelCardForm / @duffel/components) without ever exposing this
+    server's real Duffel API key to the browser. Short-lived by design --
+    fetch a fresh one right before rendering the card form, don't cache it.
+    See docs/Car_Rental_Payment_Gap.md for the full flow this is step one
+    of."""
+
+    component_client_key: str

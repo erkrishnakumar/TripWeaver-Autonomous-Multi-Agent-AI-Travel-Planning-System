@@ -67,6 +67,7 @@ _SEARCH_FIXTURES_PATH = Path(__file__).parent / "fixtures" / "car_rental_rates.j
 _CARS_SEARCH_PATH = "/cars/search"
 _CARS_QUOTES_PATH = "/cars/quotes"
 _CARS_BOOKINGS_PATH = "/cars/bookings"
+_IDENTITY_COMPONENT_CLIENT_KEYS_PATH = "/identity/component_client_keys"
 
 
 class DuffelCarsAPIError(Exception):
@@ -417,18 +418,30 @@ def get_car_rental_quote(query: CarQuoteInput) -> CarQuoteResult | ToolError:
     )
 
 
-def create_car_rental_booking(quote_id: str, driver: DriverDetails) -> dict[str, Any] | ToolError:
+def create_car_rental_booking(
+    quote_id: str, driver: DriverDetails, three_d_secure_session_id: str
+) -> dict[str, Any] | ToolError:
     """
     Creates a REAL, CONFIRMED car rental booking against Duffel's actual
     /cars/bookings endpoint. THIS ACTUALLY BOOKS SOMETHING FOR REAL.
 
-    NOT CALLED ANYWHERE IN THIS CODEBASE. Written now to prove the real
-    contract (verified against Duffel's docs, 2026-08) rather than guess it
-    later, but must only ever be invoked from a separate, explicitly
-    human-triggered path (Phase 8) — never from propose_booking(), never
+    Must only ever be invoked from a separate, explicitly human-triggered
+    path (Gate 2's confirm_booking()) — never from propose_booking(), never
     from an agent, never automatically. Adding a call to this function
     anywhere else in the codebase defeats TripWeaver's entire human-
     approval-gate design.
+
+    *** CONTRACT VERIFIED LIVE AGAINST THE REAL SANDBOX (2026-09) ***
+    Unlike Flights/Stays, Cars has NO "bill to balance" option at all —
+    every booking requires a real, tokenized card payment. A first live
+    attempt with `payment: {"type": "balance"}` (the Flights convention)
+    got a real 422: "Field 'card_id' or exactly one of the following
+    fields must be present: card_id, three_d_secure_session_id". This
+    function takes `three_d_secure_session_id` — obtained by the caller via
+    Duffel's client-side card-tokenization flow (create_component_client_
+    key() below issues the client_key that flow needs), never a raw card
+    number, which never touches this backend at all. See
+    docs/Car_Rental_Payment_Gap.md for the full resolution history.
     """
     try:
         settings.validate_duffel()
@@ -443,7 +456,7 @@ def create_car_rental_booking(quote_id: str, driver: DriverDetails) -> dict[str,
     payload = {
         "data": {
             "quote_id": quote_id,
-            "payment": {"type": "balance"},
+            "payment": {"three_d_secure_session_id": three_d_secure_session_id},
             "driver": {
                 "given_name": driver.given_name,
                 "family_name": driver.family_name,
@@ -471,6 +484,52 @@ def create_car_rental_booking(quote_id: str, driver: DriverDetails) -> dict[str,
         )
 
     return cast(dict[str, Any], raw.get("data", {}))
+
+
+def create_component_client_key() -> str | ToolError:
+    """
+    Issues a short-lived client_key authorizing Duffel's browser-side card
+    form (DuffelCardForm / @duffel/components) WITHOUT ever exposing this
+    server's real Duffel API key to the browser. This is the first step of
+    the card-tokenization flow create_car_rental_booking() needs a
+    three_d_secure_session_id from — see docs/Car_Rental_Payment_Gap.md.
+
+    *** CONTRACT VERIFIED LIVE (2026-09) *** POST /identity/component_
+    client_keys, empty body ({"data": {}}) works for an anonymous
+    (no specific user/order/booking) key. The response field is
+    `component_client_key`, NOT `client_key` as some secondary
+    documentation sources describe -- confirmed by making the real call
+    and reading the actual response, not assumed from search results.
+    """
+    try:
+        settings.validate_duffel()
+    except RuntimeError as e:
+        return ToolError(
+            tool_name="create_component_client_key",
+            error_type="config_error",
+            message=str(e),
+            retryable=False,
+        )
+
+    try:
+        raw = _post_cars(_IDENTITY_COMPONENT_CLIENT_KEYS_PATH, {"data": {}})
+    except DuffelCarsAPIError as e:
+        return ToolError(
+            tool_name="create_component_client_key",
+            error_type="duffel_api_error",
+            message=e.message,
+            retryable=e.retryable,
+        )
+    except httpx.TimeoutException:
+        return ToolError(
+            tool_name="create_component_client_key",
+            error_type="timeout",
+            message="Duffel API did not respond within 15s",
+            retryable=True,
+        )
+
+    data = raw.get("data", raw)
+    return cast(str, data["component_client_key"])
 
 
 if __name__ == "__main__":

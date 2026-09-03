@@ -337,7 +337,9 @@ class TestGetBookingConfirmInfo:
         assert body["passenger_ids"] is None
         assert "guests" in body["note"]
 
-    async def test_car_booking_returns_unsupported_note(self, client, session):
+    async def test_car_booking_returns_fresh_quote_id(self, client, session, monkeypatch):
+        import app.api.main as main_module
+
         token, user_id = await _register_and_login(client, "jane@example.com")
         trip = await create_trip(
             session,
@@ -376,6 +378,17 @@ class TestGetBookingConfirmInfo:
         )
         await session.commit()
 
+        monkeypatch.setattr(
+            main_module,
+            "get_car_rental_quote",
+            lambda query: CarQuoteResult(
+                quote_id="qut_fresh_002",
+                rate_id="rae_test_001",
+                total_price_usd=94.62,
+                payment_type=CarRentalPaymentType.PREPAID,
+            ),
+        )
+
         resp = await client.get(
             f"/trips/{trip.id}/bookings/{result.booking_id}/confirm-info",
             headers={"Authorization": f"Bearer {token}"},
@@ -383,7 +396,8 @@ class TestGetBookingConfirmInfo:
         assert resp.status_code == 200
         body = resp.json()
         assert body["booking_type"] == "car"
-        assert "Car_Rental_Payment_Gap" in body["note"]
+        # Live re-fetched value, not the one stored at propose time.
+        assert body["car_quote_id"] == "qut_fresh_002"
 
     async def test_unknown_booking_returns_404(self, client):
         token, _ = await _register_and_login(client, "jane@example.com")

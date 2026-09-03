@@ -436,13 +436,103 @@ class TestConfirmBookingHotel:
 
 
 class TestConfirmBookingCar:
-    async def test_car_booking_is_rejected_as_unsupported(self, session):
+    async def test_missing_payment_token_returns_tool_error(self, session):
         _, approval_id = await _propose_car(session)
 
-        result = await confirm_booking(session, approval_id, passengers=None)
+        result = await confirm_booking(session, approval_id, three_d_secure_session_id=None)
 
         assert isinstance(result, ToolError)
-        assert result.error_type == "unsupported_booking_type"
+        assert result.error_type == "missing_payment_token"
 
         booking = (await session.execute(select(Booking))).scalar_one()
         assert booking.status == BookingStatus.PENDING_APPROVAL
+
+    async def test_successful_confirm_books_and_stores_reference(self, session, monkeypatch):
+        monkeypatch.setattr(
+            confirm_booking_module,
+            "get_car_rental_quote",
+            lambda query: CarQuoteResult(
+                quote_id="qut_fresh_001",
+                rate_id="rae_test_001",
+                total_price_usd=94.62,
+                payment_type=CarRentalPaymentType.PREPAID,
+            ),
+        )
+        monkeypatch.setattr(
+            confirm_booking_module,
+            "create_car_rental_booking",
+            lambda quote_id, driver, three_d_secure_session_id: {"reference": "CARBK123"},
+        )
+
+        _, approval_id = await _propose_car(session)
+        result = await confirm_booking(
+            session, approval_id, three_d_secure_session_id="tds_test_session_001"
+        )
+
+        assert not isinstance(result, ToolError)
+        assert result.booking_status == "booked"
+        assert result.provider_booking_reference == "CARBK123"
+
+        booking = (await session.execute(select(Booking))).scalar_one()
+        approval = (await session.execute(select(Approval))).scalar_one()
+        assert booking.status == BookingStatus.BOOKED
+        assert booking.provider_booking_reference == "CARBK123"
+        assert approval.decision == ApprovalDecision.APPROVED
+
+    async def test_expired_quote_fails_the_booking_not_the_approval(self, session, monkeypatch):
+        monkeypatch.setattr(
+            confirm_booking_module,
+            "get_car_rental_quote",
+            lambda query: ToolError(
+                tool_name="get_car_rental_quote",
+                error_type="rate_not_found",
+                message="Rate has expired.",
+                retryable=False,
+            ),
+        )
+
+        _, approval_id = await _propose_car(session)
+        result = await confirm_booking(
+            session, approval_id, three_d_secure_session_id="tds_test_session_001"
+        )
+
+        assert not isinstance(result, ToolError)
+        assert result.booking_status == "booking_failed"
+
+        booking = (await session.execute(select(Booking))).scalar_one()
+        approval = (await session.execute(select(Approval))).scalar_one()
+        assert booking.status == BookingStatus.BOOKING_FAILED
+        assert booking.failure_reason == "Rate has expired."
+        assert approval.decision == ApprovalDecision.APPROVED
+
+    async def test_declined_payment_fails_the_booking(self, session, monkeypatch):
+        monkeypatch.setattr(
+            confirm_booking_module,
+            "get_car_rental_quote",
+            lambda query: CarQuoteResult(
+                quote_id="qut_fresh_001",
+                rate_id="rae_test_001",
+                total_price_usd=94.62,
+                payment_type=CarRentalPaymentType.PREPAID,
+            ),
+        )
+        monkeypatch.setattr(
+            confirm_booking_module,
+            "create_car_rental_booking",
+            lambda quote_id, driver, three_d_secure_session_id: ToolError(
+                tool_name="create_car_rental_booking",
+                error_type="duffel_api_error",
+                message="Duffel Cars API returned 422: payment declined",
+                retryable=False,
+            ),
+        )
+
+        _, approval_id = await _propose_car(session)
+        result = await confirm_booking(
+            session, approval_id, three_d_secure_session_id="tds_test_session_001"
+        )
+
+        assert not isinstance(result, ToolError)
+        assert result.booking_status == "booking_failed"
+        booking = (await session.execute(select(Booking))).scalar_one()
+        assert booking.provider_booking_reference is None

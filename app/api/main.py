@@ -29,6 +29,7 @@ from app.api.schemas import (
     ApprovalDecisionResponse,
     AuditLogEntryRead,
     BookingRead,
+    ComponentClientKeyResponse,
     ConfirmApprovalRequest,
     ConfirmInfoResponse,
     ForgotPasswordRequest,
@@ -41,20 +42,31 @@ from app.api.schemas import (
     TripCreate,
     TripProceedResponse,
     TripRead,
+    UpdateMeRequest,
     UserRead,
 )
 from app.auth.passwords import PasswordTooLongError, hash_password, verify_password
 from app.auth.reset_tokens import generate_reset_token, hash_reset_token
 from app.auth.tokens import create_access_token
 from app.config import settings
-from app.db.models import Approval, AuditLog, Booking, FlightOption, PasswordResetToken, Trip, User
+from app.db.models import (
+    Approval,
+    AuditLog,
+    Booking,
+    CarRentalOption,
+    FlightOption,
+    PasswordResetToken,
+    Trip,
+    User,
+)
 from app.db.models.enums import BookingType, TripStatus
 from app.email.send_email import EmailSendError, send_password_reset_email
 from app.logging_config import configure_logging
+from app.tools.car_rentals import create_component_client_key, get_car_rental_quote
 from app.tools.confirm_booking import confirm_booking, reject_booking
 from app.tools.create_trip import create_trip
 from app.tools.flights import get_flight_offer
-from app.tools.schemas import ToolError
+from app.tools.schemas import CarQuoteInput, ToolError
 from app.worker.tasks import propose_trip_bookings, run_trip_planning
 
 configure_logging()
@@ -136,6 +148,18 @@ async def login(request: Request, body: LoginRequest, db: DbSession) -> TokenRes
 
 @app.get("/auth/me", response_model=UserRead)
 async def get_me(current_user: CurrentUser) -> User:
+    return current_user
+
+
+@app.patch("/auth/me", response_model=UserRead)
+async def update_me(body: UpdateMeRequest, db: DbSession, current_user: CurrentUser) -> User:
+    """Display-name-only profile edit -- email/password have their own
+    dedicated flows (register's email is immutable; password goes through
+    /auth/reset-password) precisely so this endpoint never has to deal with
+    re-verifying identity or re-hashing a credential."""
+    current_user.full_name = body.full_name
+    await db.commit()
+    await db.refresh(current_user)
     return current_user
 
 
@@ -322,8 +346,9 @@ async def get_booking_confirm_info(
     Duffel (get_flight_offer -- the same hallucination-guard re-fetch
     confirm_booking() itself does before ever booking), never read from a
     possibly-stale cached value. Hotel bookings need no provider ids at
-    all (guests are freeform names); car bookings can't be confirmed yet
-    (see docs/Car_Rental_Payment_Gap.md)."""
+    all (guests are freeform names); car bookings return a fresh
+    car_quote_id (also live re-fetched) for the frontend's card-
+    tokenization flow -- see docs/Car_Rental_Payment_Gap.md."""
     trip = await db.get(Trip, trip_id)
     _trip_or_404(trip, current_user)
 
@@ -362,10 +387,23 @@ async def get_booking_confirm_info(
             ),
         )
 
+    car_option = await db.get(CarRentalOption, booking.car_rental_option_id)
+    assert car_option is not None  # guaranteed by the FK for a CAR booking
+    fresh_quote = get_car_rental_quote(CarQuoteInput(rate_id=car_option.provider_rate_id))
+    if isinstance(fresh_quote, ToolError):
+        raise HTTPException(
+            status_code=422, detail=f"Could not refresh this quote: {fresh_quote.message}"
+        )
     return ConfirmInfoResponse(
         booking_type=booking.booking_type,
         approval_id=approval.id,
-        note="Car rental bookings cannot be confirmed yet -- see docs/Car_Rental_Payment_Gap.md.",
+        car_quote_id=fresh_quote.quote_id,
+        note=(
+            "Requires a real card payment token. Call GET /car-rentals/component-client-key, "
+            "use it with Duffel's card-tokenization flow (resourceId = car_quote_id above) to "
+            "get a three_d_secure_session_id, then supply that in "
+            "POST /approvals/{approval_id}/confirm."
+        ),
     )
 
 
@@ -445,6 +483,22 @@ async def _require_own_approval(
     return uuid.UUID(str(row.id))
 
 
+@app.get("/car-rentals/component-client-key", response_model=ComponentClientKeyResponse)
+async def get_car_rental_component_client_key(
+    current_user: CurrentUser,
+) -> ComponentClientKeyResponse:
+    """Step one of the car-rental payment flow (see docs/Car_Rental_Payment_
+    Gap.md): the frontend calls this right before rendering Duffel's
+    browser-side card form, which needs this key to authorize itself
+    without this server's real Duffel API key ever reaching the browser.
+    Requires login (current_user unused otherwise) so an anonymous caller
+    can't mint keys against this account's Duffel quota for free."""
+    key = create_component_client_key()
+    if isinstance(key, ToolError):
+        raise HTTPException(status_code=502, detail=key.message)
+    return ComponentClientKeyResponse(component_client_key=key)
+
+
 @app.post("/approvals/{approval_id}/confirm", response_model=ApprovalDecisionResponse)
 async def confirm_approval(
     approval_id: uuid.UUID,
@@ -466,6 +520,7 @@ async def confirm_approval(
         guests=body.guests,
         contact_email=body.contact_email,
         contact_phone_number=body.contact_phone_number,
+        three_d_secure_session_id=body.three_d_secure_session_id,
         decided_by=body.decided_by,
     )
     if isinstance(result, ToolError):

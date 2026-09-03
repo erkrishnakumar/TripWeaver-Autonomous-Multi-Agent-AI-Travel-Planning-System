@@ -122,7 +122,7 @@ class Settings:
     jwt_secret_key: str = os.environ.get("JWT_SECRET_KEY", "")
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = int(
-        os.environ.get("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440")
+        os.environ.get("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30")
     )
     # Deliberately much shorter than the access token above -- a reset
     # token grants "set a new password entirely," a more sensitive

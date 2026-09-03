@@ -21,11 +21,12 @@ discipline flow.py already applies before propose_booking(), extended here
 to also catch an offer that has simply expired between proposal and human
 approval (which can be minutes or days later).
 
-Car rentals are NOT supported here -- see docs/Car_Rental_Payment_Gap.md.
-Duffel Cars requires a tokenized card (card_id/three_d_secure_session_id)
-that nothing in this project can produce yet (no frontend). Calling
-confirm_booking() on a CAR booking returns a ToolError rather than
-attempting anything.
+Car rentals: confirming one requires a real, tokenized card payment (Duffel
+Cars has no "bill to balance" option at all, unlike Flights/Stays) -- see
+docs/Car_Rental_Payment_Gap.md for the full history. The caller must supply
+a `three_d_secure_session_id`, obtained via Duffel's browser-side card-
+tokenization flow (create_component_client_key() issues the client_key
+that flow needs) -- a raw card number never reaches this backend at all.
 """
 
 from __future__ import annotations
@@ -35,12 +36,20 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Approval, Booking, FlightOption, HotelOption
+from app.db.models import Approval, Booking, CarRentalOption, FlightOption, HotelOption
 from app.db.models.enums import ApprovalDecision, BookingStatus, BookingType
 from app.tools.audit import log_stage_event
+from app.tools.car_rentals import create_car_rental_booking, get_car_rental_quote
 from app.tools.flights import create_flight_order, get_flight_offer
 from app.tools.hotels import create_hotel_booking, get_hotel_quote, get_hotel_rate
-from app.tools.schemas import BookingDecisionResult, HotelGuestDetails, PassengerDetails, ToolError
+from app.tools.schemas import (
+    BookingDecisionResult,
+    CarQuoteInput,
+    DriverDetails,
+    HotelGuestDetails,
+    PassengerDetails,
+    ToolError,
+)
 
 
 async def _load_approval_and_booking(
@@ -142,20 +151,23 @@ async def confirm_booking(
     guests: list[HotelGuestDetails] | None = None,
     contact_email: str | None = None,
     contact_phone_number: str | None = None,
+    three_d_secure_session_id: str | None = None,
     decided_by: str | None = None,
 ) -> BookingDecisionResult | ToolError:
     """
-    Confirms a pending approval and, on a flight or hotel booking, actually
-    books it for real against Duffel. See module docstring for the
-    re-verification/commit-timing rationale.
+    Confirms a pending approval and actually books it for real against
+    Duffel. See module docstring for the re-verification/commit-timing
+    rationale.
 
     passengers is required (and must exactly match the freshly re-fetched
     offer's passenger_ids) for a FLIGHT booking; guests/contact_email/
-    contact_phone_number are required for a HOTEL booking. Neither is
-    collected or persisted anywhere before this call -- this is the first
-    and only point real passenger/guest PII enters the system, and it is
-    never persisted beyond what create_flight_order()/create_hotel_booking()
-    themselves send to Duffel.
+    contact_phone_number are required for a HOTEL booking;
+    three_d_secure_session_id is required for a CAR booking (see module
+    docstring). None of this is collected or persisted anywhere before
+    this call -- this is the first and only point real passenger/guest PII
+    enters the system, and it is never persisted beyond what create_flight_
+    order()/create_hotel_booking()/create_car_rental_booking() themselves
+    send to Duffel.
 
     A real provider failure (e.g. an expired offer, a declined payment)
     does NOT raise -- it sets Booking.status = BOOKING_FAILED with
@@ -169,16 +181,36 @@ async def confirm_booking(
     approval, booking = loaded
 
     if booking.booking_type == BookingType.CAR:
-        return ToolError(
-            tool_name="confirm_booking",
-            error_type="unsupported_booking_type",
-            message=(
-                "Car rental bookings cannot be confirmed yet -- Duffel Cars requires a "
-                "tokenized card payment method that this project cannot produce without a "
-                "new frontend piece. See docs/Car_Rental_Payment_Gap.md."
-            ),
-            retryable=False,
+        if not three_d_secure_session_id:
+            return ToolError(
+                tool_name="confirm_booking",
+                error_type="missing_payment_token",
+                message="three_d_secure_session_id is required to confirm a car rental booking.",
+                retryable=False,
+            )
+        car_option = await session.get(CarRentalOption, booking.car_rental_option_id)
+        assert car_option is not None  # guaranteed by the FK for a CAR booking
+
+        # Re-quote fresh, same freshness discipline as flights/hotels above
+        # -- a quote can expire between propose time and this human
+        # approval, which can be minutes or days later.
+        fresh_quote = get_car_rental_quote(CarQuoteInput(rate_id=car_option.provider_rate_id))
+        if isinstance(fresh_quote, ToolError):
+            return await _fail_booking(session, booking, approval, fresh_quote.message, decided_by)
+
+        driver = DriverDetails.model_validate(car_option.driver_details)
+        car_booking = create_car_rental_booking(
+            fresh_quote.quote_id, driver, three_d_secure_session_id
         )
+        if isinstance(car_booking, ToolError):
+            return await _fail_booking(session, booking, approval, car_booking.message, decided_by)
+
+        reference = str(
+            car_booking.get("reference")
+            or car_booking.get("booking_reference")
+            or car_booking.get("id", "")
+        )
+        return await _succeed_booking(session, booking, approval, reference, decided_by)
 
     if booking.booking_type == BookingType.FLIGHT:
         if not passengers:
