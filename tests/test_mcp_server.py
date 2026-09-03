@@ -33,6 +33,7 @@ ever violated in server.py.
 
 from __future__ import annotations
 
+import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 
@@ -40,6 +41,7 @@ import pytest
 import pytest_asyncio
 from fastmcp import Client
 from fastmcp.exceptions import ToolError as MCPToolError
+from fastmcp.server.auth import AccessToken as MCPAccessToken
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.mcp_server.server as server_module
@@ -88,8 +90,31 @@ async def sqlite_session_override(monkeypatch):
             yield session
 
     monkeypatch.setattr(server_module, "get_session", _get_session)
-    yield
+    yield session_factory
     await engine.dispose()
+
+
+TEST_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+OTHER_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000002")
+
+
+def _fake_access_token(user_id: uuid.UUID) -> MCPAccessToken:
+    return MCPAccessToken(token="test-token", client_id=str(user_id), scopes=[])
+
+
+@pytest.fixture(autouse=True)
+def _authenticated(monkeypatch):
+    """Every tool in app/mcp_server/server.py now requires a real,
+    authenticated user (see that module's AUTH docstring section) --
+    _current_user_id() reads it via get_access_token(). The in-memory
+    Client transport these tests use never goes through FastMCP's
+    HTTP-level auth middleware at all (it bypasses the ASGI app entirely,
+    calling the server directly), so the only way to simulate "an
+    authenticated caller" here is to patch get_access_token() itself.
+    Defaults every test to a fixed authenticated test user; the handful of
+    tests that specifically exercise auth/ownership rejection override
+    this back with their own monkeypatch."""
+    monkeypatch.setattr(server_module, "get_access_token", lambda: _fake_access_token(TEST_USER_ID))
 
 
 @pytest.fixture
@@ -431,6 +456,21 @@ class TestCreateTripTool:
         assert trip.status == "draft"
         assert trip.adults == 1
 
+    async def test_trip_is_owned_by_the_authenticated_caller(self, sqlite_session_override):
+        """A trip created here must have a real owner -- otherwise it's
+        permanently unreachable through the real approval-gate HTTP API
+        (see the module docstring's AUTH section)."""
+        from app.db.models import Trip
+
+        async with Client(server_module.mcp) as client:
+            trip = await _mcp_create_trip(client)
+
+        session_factory = sqlite_session_override
+        async with session_factory() as session:
+            row = await session.get(Trip, uuid.UUID(trip.id))
+            assert row is not None
+            assert row.user_id == TEST_USER_ID
+
     async def test_optional_fields_default_correctly(self, sqlite_session_override):
         async with Client(server_module.mcp) as client:
             trip = await _mcp_create_trip(
@@ -713,6 +753,99 @@ class TestProposeCarBookingTool:
                         "quote": car_quote.model_dump(mode="json"),
                         "driver": driver_details.model_dump(mode="json"),
                     },
+                )
+
+
+# ---------------------------------------------------------------------------
+# Auth -- every tool requires a real, authenticated user (see server.py's
+# module docstring AUTH section for why).
+# ---------------------------------------------------------------------------
+
+
+class TestMCPAuth:
+    async def test_unauthenticated_call_is_rejected(self, monkeypatch):
+        monkeypatch.setattr(server_module, "get_access_token", lambda: None)
+
+        async with Client(server_module.mcp) as client:
+            with pytest.raises(MCPToolError, match="Authentication required"):
+                await client.call_tool(
+                    "search_flights",
+                    {
+                        "query": {
+                            "origin": "JFK",
+                            "destination": "ATL",
+                            "depart_date": _depart_date_str(),
+                            "adults": 1,
+                        }
+                    },
+                )
+
+    async def test_token_with_non_uuid_subject_is_rejected(self, monkeypatch):
+        monkeypatch.setattr(
+            server_module,
+            "get_access_token",
+            lambda: MCPAccessToken(token="t", client_id="not-a-uuid", scopes=[]),
+        )
+
+        async with Client(server_module.mcp) as client:
+            with pytest.raises(MCPToolError, match="not a valid user id"):
+                await client.call_tool(
+                    "search_flights",
+                    {
+                        "query": {
+                            "origin": "JFK",
+                            "destination": "ATL",
+                            "depart_date": _depart_date_str(),
+                            "adults": 1,
+                        }
+                    },
+                )
+
+    async def test_cannot_propose_a_booking_against_another_users_trip(
+        self, sqlite_session_override, flight_offer, monkeypatch
+    ):
+        async with Client(server_module.mcp) as client:
+            trip = await _mcp_create_trip(client)  # created as TEST_USER_ID
+
+        monkeypatch.setattr(
+            server_module, "get_access_token", lambda: _fake_access_token(OTHER_USER_ID)
+        )
+        async with Client(server_module.mcp) as client:
+            with pytest.raises(MCPToolError, match="invalid_trip_id"):
+                await client.call_tool(
+                    "propose_flight_booking",
+                    {"trip_id": trip.id, "offer": flight_offer.model_dump(mode="json")},
+                )
+
+    async def test_cannot_propose_a_booking_against_an_ownerless_trip(
+        self, sqlite_session_override, flight_offer
+    ):
+        """A trip with no owner at all (e.g. created before this ownership
+        check existed, or via a path that never set user_id) must be
+        equally unreachable, not treated as belonging to anyone who asks."""
+        from app.db.models import Trip
+        from app.db.models.enums import TripStatus
+
+        session_factory = sqlite_session_override
+        async with session_factory() as session:
+            trip = Trip(
+                id=uuid.uuid4(),
+                origin_iata="JFK",
+                destination_iata="ATL",
+                depart_date=date.today() + timedelta(days=30),
+                adults=1,
+                user_id=None,
+                status=TripStatus.DRAFT,
+            )
+            session.add(trip)
+            await session.commit()
+            trip_id = str(trip.id)
+
+        async with Client(server_module.mcp) as client:
+            with pytest.raises(MCPToolError, match="invalid_trip_id"):
+                await client.call_tool(
+                    "propose_flight_booking",
+                    {"trip_id": trip_id, "offer": flight_offer.model_dump(mode="json")},
                 )
 
 

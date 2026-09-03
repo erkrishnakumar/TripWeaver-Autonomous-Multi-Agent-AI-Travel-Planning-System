@@ -80,18 +80,42 @@ a session held open across this (long-running) server process's lifetime.
 This matches how propose_booking()'s own tests use it (caller owns the
 transaction boundary) and avoids a stale, long-lived session accumulating
 state across unrelated calls.
+
+AUTH: every tool here requires a real, authenticated TripWeaver user --
+the same bearer JWT app/auth/tokens.py issues for the HTTP API's
+POST /auth/login, not a separate credential system for MCP clients. Two
+reasons this exists, not just "nice to have API hygiene": Duffel's own
+Service Agreement requires a closed, authenticated user group (see
+docs/Auth_Requirement.md — this file's search_flights/search_hotels/
+search_car_rentals/get_car_rental_quote/check_visa_requirements all call a
+real, metered third-party API), and without a user_id a trip created here
+has no owner, making it permanently unreachable through the real
+approval-gate HTTP API (Trip.user_id is None, and every trip/approval
+endpoint there 404s on an ownerless resource rather than exposing it to
+anyone — see app/api/main.py). _current_user_id() below enforces this at
+the tool-call level (checked directly, not only relied on via FastMCP's
+own HTTP-level `auth=` gate) so the same requirement holds for every
+transport this server might run over, including the in-memory transport
+this file's own tests use.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import date
 from typing import TypeVar
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError as MCPToolError
+from fastmcp.server.auth import AccessToken as MCPAccessToken
+from fastmcp.server.auth import TokenVerifier
+from fastmcp.server.dependencies import get_access_token
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.tokens import InvalidTokenError, decode_access_token
+from app.db.models import Trip
 from app.db.session import get_session
 from app.tools.car_rentals import get_car_rental_quote as _get_car_rental_quote
 from app.tools.car_rentals import search_car_rentals as _search_car_rentals
@@ -131,8 +155,68 @@ from app.tools.weather import get_weather_forecast as _get_weather_forecast
 
 logger = logging.getLogger(__name__)
 
+
+class _JWTBearerVerifier(TokenVerifier):
+    """Verifies the same HS256 JWT bearer tokens app/auth/tokens.py issues
+    for the HTTP API. Deliberately NOT fastmcp's own JWTVerifier, which
+    needs a public_key/secret handed to it eagerly at construction time --
+    that would make this module fail to import outright wherever
+    JWT_SECRET_KEY isn't set yet (e.g. a clean CI checkout that never
+    touches this file's own JWT settings). decode_access_token() instead
+    reads settings.jwt_secret_key fresh on every call, same as
+    app/api/deps.py's get_current_user() does for the HTTP API.
+    """
+
+    async def verify_token(self, token: str) -> MCPAccessToken | None:
+        try:
+            user_id = decode_access_token(token)
+        except InvalidTokenError:
+            return None
+        except RuntimeError:
+            # settings.validate_jwt() failure -- JWT_SECRET_KEY isn't
+            # configured at all. Reject the token rather than 500ing.
+            return None
+        return MCPAccessToken(token=token, client_id=user_id, scopes=[], claims={"sub": user_id})
+
+
+def _current_user_id() -> uuid.UUID:
+    """Every tool below calls this first. Raises a client-visible
+    MCPToolError (never returns a domain ToolError -- there's no
+    "graceful" outcome for a missing/invalid identity) if the caller isn't
+    a real, authenticated TripWeaver user. See the module docstring's AUTH
+    section for why this exists."""
+    token = get_access_token()
+    if token is None:
+        raise MCPToolError(
+            "Authentication required. Call POST /auth/login on the TripWeaver "
+            "API to get a bearer token, then send it as this MCP connection's "
+            "Authorization header."
+        )
+    try:
+        return uuid.UUID(token.client_id)
+    except ValueError:
+        raise MCPToolError("Authenticated token's subject is not a valid user id.") from None
+
+
+async def _load_owned_trip(session: AsyncSession, trip_id: str, user_id: uuid.UUID) -> Trip:
+    """Same ownership discipline as app/api/main.py: 404-shaped (a generic
+    "no trip found"), never 403 -- existence isn't confirmed to a
+    non-owner, and an ownerless trip (Trip.user_id is None, e.g. one
+    created before this check existed) is equally unreachable rather than
+    being treated as belonging to anyone who asks."""
+    try:
+        trip_uuid = uuid.UUID(trip_id)
+    except ValueError:
+        raise MCPToolError(f"[invalid_trip_id] '{trip_id}' is not a valid UUID.") from None
+    trip = await session.get(Trip, trip_uuid)
+    if trip is None or trip.user_id != user_id:
+        raise MCPToolError(f"[invalid_trip_id] No trip found with id '{trip_id}'.")
+    return trip
+
+
 mcp = FastMCP(
     name="TripWeaver",
+    auth=_JWTBearerVerifier(),
     instructions=(
         "Travel-planning tools for TripWeaver. search_flights, search_hotels, and "
         "get_weather_forecast are read-only lookups. check_visa_requirements returns an "
@@ -184,6 +268,7 @@ def search_flights(query: FlightSearchInput) -> FlightSearchResult:
     max_budget_usd. Runs against local fixtures if the server's
     USE_MOCK_DATA env var is true, otherwise the real Duffel sandbox.
     """
+    _current_user_id()
     return _unwrap(_search_flights(query))
 
 
@@ -195,6 +280,7 @@ def get_weather_forecast(query: WeatherSearchInput) -> WeatherForecastResult:
     tool-call error explaining the limitation rather than a misleading or
     empty result.
     """
+    _current_user_id()
     return _unwrap(_get_weather_forecast(query))
 
 
@@ -206,6 +292,7 @@ def search_hotels(query: HotelSearchInput) -> HotelSearchResult:
     best-effort estimate, not a guaranteed bookable rate — present it to
     the traveler as an estimate, never as a firm price.
     """
+    _current_user_id()
     return _unwrap(_search_hotels(query))
 
 
@@ -218,6 +305,7 @@ def check_visa_requirements(query: VisaCheckInput) -> VisaCheckResult:
     `visa_required: null` as 'unknown — check an official source', not as
     an error or a false negative.
     """
+    _current_user_id()
     return _unwrap(_check_visa_requirements(query))
 
 
@@ -235,6 +323,7 @@ def estimate_ground_transport(
     estimated_cost_usd_low/high, and present the range as a rough budgeting
     figure, never as a fare quote.
     """
+    _current_user_id()
     return _unwrap(_estimate_ground_transport(query))
 
 
@@ -247,6 +336,7 @@ def search_car_rentals(query: CarRentalSearchInput) -> CarRentalSearchResult:
     get_car_rental_quote on the chosen rate_id before proposing it for
     booking or presenting a firm price to the traveler.
     """
+    _current_user_id()
     return _unwrap(_search_car_rentals(query))
 
 
@@ -259,6 +349,7 @@ def get_car_rental_quote(query: CarQuoteInput) -> CarQuoteResult:
     original rate's price — always use THIS tool's price, never the rate's
     own estimated_price_total_usd, once a specific rate has been chosen.
     """
+    _current_user_id()
     return _unwrap(_get_car_rental_quote(query))
 
 
@@ -281,8 +372,10 @@ async def create_trip(
     This is the required entry point for any stateful flow through this
     server: the returned `id` is the trip_id that propose_flight_booking
     and propose_hotel_booking need. IATA codes are upper-cased
-    automatically.
+    automatically. Owned by the authenticated caller -- see the module
+    docstring's AUTH section for why this matters.
     """
+    user_id = _current_user_id()
     async with get_session() as session:
         try:
             trip = await _create_trip(
@@ -294,6 +387,7 @@ async def create_trip(
                 adults=adults,
                 max_budget_usd=max_budget_usd,
                 requester_email=requester_email,
+                user_id=user_id,
             )
             await session.commit()
         except Exception:
@@ -327,8 +421,10 @@ async def propose_flight_booking(trip_id: str, offer: FlightOffer) -> ProposeBoo
     returns the same pending booking with was_existing=true instead of
     creating a duplicate.
     """
+    user_id = _current_user_id()
     query = ProposeFlightBookingInput(trip_id=trip_id, offer=offer)
     async with get_session() as session:
+        await _load_owned_trip(session, trip_id, user_id)
         result = await _propose_booking(session, query)
         if isinstance(result, DomainToolError):
             await session.rollback()
@@ -359,10 +455,12 @@ async def propose_hotel_booking(
     same pending booking with was_existing=true instead of creating a
     duplicate.
     """
+    user_id = _current_user_id()
     query = ProposeHotelBookingInput(
         trip_id=trip_id, listing=listing, check_in=check_in, check_out=check_out
     )
     async with get_session() as session:
+        await _load_owned_trip(session, trip_id, user_id)
         result = await _propose_booking(session, query)
         if isinstance(result, DomainToolError):
             await session.rollback()
@@ -395,8 +493,10 @@ async def propose_car_booking(
     second call returns the same pending booking with was_existing=true
     instead of creating a duplicate.
     """
+    user_id = _current_user_id()
     query = ProposeCarBookingInput(trip_id=trip_id, rate=rate, quote=quote, driver=driver)
     async with get_session() as session:
+        await _load_owned_trip(session, trip_id, user_id)
         result = await _propose_booking(session, query)
         if isinstance(result, DomainToolError):
             await session.rollback()
