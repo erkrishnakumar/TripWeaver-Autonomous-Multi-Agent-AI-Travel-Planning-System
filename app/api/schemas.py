@@ -95,6 +95,30 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ForgotPasswordResponse(BaseModel):
+    """reset_token is populated ONLY because no email-sending integration
+    exists yet (see docs/Auth_Requirement.md) -- this is a dev-mode-only
+    delivery mechanism. A real deployment MUST email this value to the
+    user instead of returning it in the HTTP response, and this field
+    should be removed/nulled out the moment that lands, since returning it
+    here means anyone who can call this endpoint can reset anyone's
+    password. message is always the same regardless of whether the email
+    matched a real account, since reset_token itself already reveals that
+    -- there is no user-enumeration protection to preserve in dev mode."""
+
+    message: str
+    reset_token: str | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(..., min_length=8)
+
+
 class UserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

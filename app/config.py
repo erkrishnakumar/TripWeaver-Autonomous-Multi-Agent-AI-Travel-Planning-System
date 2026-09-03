@@ -115,6 +115,14 @@ class Settings:
     jwt_access_token_expire_minutes: int = int(
         os.environ.get("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440")
     )
+    # Deliberately much shorter than the access token above -- a reset
+    # token grants "set a new password entirely," a more sensitive
+    # capability than a normal session, so it should be usable for a much
+    # narrower window even though (see docs/Auth_Requirement.md) it's
+    # currently returned directly in the API response rather than emailed.
+    password_reset_token_expire_minutes: int = int(
+        os.environ.get("PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "30")
+    )
 
     def validate_jwt(self) -> None:
         if not self.jwt_secret_key:

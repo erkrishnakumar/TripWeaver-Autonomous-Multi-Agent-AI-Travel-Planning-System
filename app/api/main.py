@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, NoReturn
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -24,9 +25,12 @@ from app.api.schemas import (
     AuditLogEntryRead,
     BookingRead,
     ConfirmApprovalRequest,
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
     LoginRequest,
     RegisterRequest,
     RejectApprovalRequest,
+    ResetPasswordRequest,
     TokenResponse,
     TripCreate,
     TripProceedResponse,
@@ -34,8 +38,10 @@ from app.api.schemas import (
     UserRead,
 )
 from app.auth.passwords import PasswordTooLongError, hash_password, verify_password
+from app.auth.reset_tokens import generate_reset_token, hash_reset_token
 from app.auth.tokens import create_access_token
-from app.db.models import Approval, AuditLog, Booking, Trip, User
+from app.config import settings
+from app.db.models import Approval, AuditLog, Booking, PasswordResetToken, Trip, User
 from app.db.models.enums import TripStatus
 from app.logging_config import configure_logging
 from app.tools.confirm_booking import confirm_booking, reject_booking
@@ -89,6 +95,74 @@ async def login(body: LoginRequest, db: DbSession) -> TokenResponse:
     if not user.is_active:
         raise HTTPException(status_code=403, detail="This account has been deactivated.")
     return TokenResponse(access_token=create_access_token(str(user.id)))
+
+
+@app.post("/auth/forgot-password", response_model=ForgotPasswordResponse)
+async def forgot_password(body: ForgotPasswordRequest, db: DbSession) -> ForgotPasswordResponse:
+    """Issues a single-use, expiring reset token. See ForgotPasswordResponse's
+    own docstring for why reset_token is returned directly here rather than
+    emailed -- this is a real, tracked, dev-mode-only gap
+    (docs/Auth_Requirement.md), not the intended production behavior."""
+    result = await db.execute(select(User).where(User.email == body.email))
+    user = result.scalar_one_or_none()
+    if user is None:
+        return ForgotPasswordResponse(message="No account found with this email.")
+
+    raw_token = generate_reset_token()
+    reset_token = PasswordResetToken(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        token_hash=hash_reset_token(raw_token),
+        expires_at=datetime.now(UTC)
+        + timedelta(minutes=settings.password_reset_token_expire_minutes),
+    )
+    db.add(reset_token)
+    await db.commit()
+    logger.info("Password reset token issued for user %s", user.id)
+    return ForgotPasswordResponse(
+        message="Reset token issued. Use it with POST /auth/reset-password.",
+        reset_token=raw_token,
+    )
+
+
+@app.post("/auth/reset-password", response_model=UserRead)
+async def reset_password(body: ResetPasswordRequest, db: DbSession) -> User:
+    invalid_token = HTTPException(
+        status_code=400, detail="This reset token is invalid, expired, or already used."
+    )
+    result = await db.execute(
+        select(PasswordResetToken).where(
+            PasswordResetToken.token_hash == hash_reset_token(body.token)
+        )
+    )
+    reset_token = result.scalar_one_or_none()
+    if reset_token is None or reset_token.used_at is not None:
+        raise invalid_token
+    # expires_at is always written tz-aware (UTC), but SQLite (used by
+    # tests; the real DB is Postgres) doesn't reliably preserve tzinfo on
+    # read-back the way Postgres does -- verified live, the same class of
+    # naive-vs-aware bug as Approval.decided_at earlier in this project.
+    # Normalize rather than assume: a naive value read back is treated as
+    # UTC, matching how every timestamp in this project is always written.
+    expires_at = reset_token.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at < datetime.now(UTC):
+        raise invalid_token
+
+    user = await db.get(User, reset_token.user_id)
+    if user is None:
+        raise invalid_token
+
+    try:
+        user.hashed_password = hash_password(body.new_password)
+    except PasswordTooLongError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    reset_token.used_at = datetime.now(UTC)
+    await db.commit()
+    logger.info("Password reset completed for user %s", user.id)
+    return user
 
 
 def _trip_or_404(trip: Trip | None, current_user: User) -> Trip:

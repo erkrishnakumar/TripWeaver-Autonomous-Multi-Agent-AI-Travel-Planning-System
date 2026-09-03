@@ -14,7 +14,7 @@ be exercised here since none of these tests touch POST /trips.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import jwt as _pyjwt
 import pytest
@@ -24,9 +24,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.api.deps import get_db
 from app.api.main import app
+from app.auth.reset_tokens import generate_reset_token, hash_reset_token
 from app.auth.tokens import InvalidTokenError, create_access_token, decode_access_token
 from app.config import settings
 from app.db.base import Base
+from app.db.models import PasswordResetToken, User
 from app.tools.create_trip import create_trip
 
 
@@ -210,3 +212,101 @@ class TestProtectedEndpoints:
         token = await _register_and_login(client, "jane@example.com")
         resp = await client.get(f"/trips/{trip.id}", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 404
+
+
+class TestForgotAndResetPassword:
+    async def test_full_reset_flow_changes_the_password(self, client):
+        await client.post(
+            "/auth/register", json={"email": "jane@example.com", "password": "originalpass"}
+        )
+
+        forgot_resp = await client.post("/auth/forgot-password", json={"email": "jane@example.com"})
+        assert forgot_resp.status_code == 200
+        reset_token = forgot_resp.json()["reset_token"]
+        assert reset_token is not None
+
+        reset_resp = await client.post(
+            "/auth/reset-password",
+            json={"token": reset_token, "new_password": "brandnewpass"},
+        )
+        assert reset_resp.status_code == 200
+
+        # Old password no longer works.
+        old_login = await client.post(
+            "/auth/login", json={"email": "jane@example.com", "password": "originalpass"}
+        )
+        assert old_login.status_code == 401
+
+        # New password works.
+        new_login = await client.post(
+            "/auth/login", json={"email": "jane@example.com", "password": "brandnewpass"}
+        )
+        assert new_login.status_code == 200
+
+    async def test_unknown_email_does_not_error(self, client):
+        """No user-enumeration protection in this dev-mode delivery
+        mechanism (see ForgotPasswordResponse's docstring) -- but the
+        endpoint itself must still respond cleanly, not 500, for an email
+        that doesn't match any account."""
+        resp = await client.post("/auth/forgot-password", json={"email": "nobody@example.com"})
+        assert resp.status_code == 200
+        assert resp.json()["reset_token"] is None
+
+    async def test_reset_token_is_single_use(self, client):
+        await client.post(
+            "/auth/register", json={"email": "jane@example.com", "password": "originalpass"}
+        )
+        forgot_resp = await client.post("/auth/forgot-password", json={"email": "jane@example.com"})
+        reset_token = forgot_resp.json()["reset_token"]
+
+        first = await client.post(
+            "/auth/reset-password", json={"token": reset_token, "new_password": "firstchange"}
+        )
+        assert first.status_code == 200
+
+        second = await client.post(
+            "/auth/reset-password", json={"token": reset_token, "new_password": "secondchange"}
+        )
+        assert second.status_code == 400
+
+    async def test_garbage_token_is_rejected(self, client):
+        resp = await client.post(
+            "/auth/reset-password", json={"token": "not-a-real-token", "new_password": "whatever1"}
+        )
+        assert resp.status_code == 400
+
+    async def test_expired_token_is_rejected(self, client, session):
+        resp = await client.post(
+            "/auth/register", json={"email": "jane@example.com", "password": "originalpass"}
+        )
+        user_id = uuid.UUID(resp.json()["id"])
+        assert (await session.get(User, user_id)) is not None
+
+        raw_token = generate_reset_token()
+        session.add(
+            PasswordResetToken(
+                id=uuid.uuid4(),
+                user_id=user_id,
+                token_hash=hash_reset_token(raw_token),
+                expires_at=datetime.now(UTC) - timedelta(minutes=1),  # already expired
+            )
+        )
+        await session.commit()
+
+        resp = await client.post(
+            "/auth/reset-password", json={"token": raw_token, "new_password": "wontwork1"}
+        )
+        assert resp.status_code == 400
+
+    async def test_new_password_too_short_is_rejected(self, client):
+        forgot_resp_setup = await client.post(
+            "/auth/register", json={"email": "jane@example.com", "password": "originalpass"}
+        )
+        assert forgot_resp_setup.status_code == 201
+        forgot_resp = await client.post("/auth/forgot-password", json={"email": "jane@example.com"})
+        reset_token = forgot_resp.json()["reset_token"]
+
+        resp = await client.post(
+            "/auth/reset-password", json={"token": reset_token, "new_password": "short"}
+        )
+        assert resp.status_code == 422

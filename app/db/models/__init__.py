@@ -12,6 +12,7 @@ from app.db.models.car_rental_option import CarRentalOption
 from app.db.models.flight_option import FlightOption
 from app.db.models.hotel_option import HotelOption
 from app.db.models.itinerary import Itinerary
+from app.db.models.password_reset_token import PasswordResetToken
 from app.db.models.trip import Trip
 from app.db.models.user import User
 
@@ -23,6 +24,7 @@ __all__ = [
     "FlightOption",
     "HotelOption",
     "Itinerary",
+    "PasswordResetToken",
     "Trip",
     "User",
 ]
