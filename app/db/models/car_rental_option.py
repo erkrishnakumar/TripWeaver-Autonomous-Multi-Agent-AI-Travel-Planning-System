@@ -87,12 +87,12 @@ class CarRentalOption(Base, TimestampMixin):
     )
 
     pickup_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=False,
     )
 
     dropoff_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=False,
     )
 

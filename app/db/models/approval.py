@@ -59,7 +59,7 @@ class Approval(Base, TimestampMixin):
     )
 
     decided_at: Mapped[datetime | None] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=True,
     )
 
