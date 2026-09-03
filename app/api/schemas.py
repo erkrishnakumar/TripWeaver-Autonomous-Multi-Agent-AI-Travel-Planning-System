@@ -11,7 +11,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict
 
-from app.db.models.enums import TripStatus
+from app.db.models.enums import ApprovalDecision, BookingStatus, BookingType, TripStatus
 from app.tools.schemas import HotelGuestDetails, PassengerDetails
 
 
@@ -77,3 +77,22 @@ class ApprovalDecisionResponse(BaseModel):
     booking_status: str
     provider_booking_reference: str | None = None
     message: str
+
+
+class BookingRead(BaseModel):
+    """One proposed (or since-decided) booking on a trip, with its approval
+    decision inlined — this is what a human approver looks at to decide what
+    to pass to POST /approvals/{id}/confirm or /reject. approval_id is
+    always present: propose_booking() never creates a Booking without one
+    (see app/tools/propose_booking.py)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    booking_id: uuid.UUID
+    booking_type: BookingType
+    status: BookingStatus
+    total_price_usd: float
+    provider_booking_reference: str | None
+    failure_reason: str | None
+    approval_id: uuid.UUID
+    approval_decision: ApprovalDecision

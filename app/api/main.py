@@ -13,18 +13,21 @@ import uuid
 from typing import Annotated, NoReturn
 
 from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db
 from app.api.schemas import (
     ApprovalDecisionResponse,
+    BookingRead,
     ConfirmApprovalRequest,
     RejectApprovalRequest,
     TripCreate,
     TripProceedResponse,
     TripRead,
 )
-from app.db.models import Trip
+from app.db.models import Booking, Trip
 from app.db.models.enums import TripStatus
 from app.tools.confirm_booking import confirm_booking, reject_booking
 from app.tools.create_trip import create_trip
@@ -65,6 +68,40 @@ async def create_trip_endpoint(
     await db.commit()
     run_trip_planning.delay(str(trip.id))
     return trip
+
+
+@app.get("/trips/{trip_id}/bookings", response_model=list[BookingRead])
+async def list_trip_bookings(
+    trip_id: uuid.UUID, db: Annotated[AsyncSession, Depends(get_db)]
+) -> list[BookingRead]:
+    """What a human approver actually looks at: every Booking proposed for
+    this trip, with its Approval decision inlined, so approval_id (needed
+    for POST /approvals/{id}/confirm|reject) never has to be dug out of the
+    database directly."""
+    trip = await db.get(Trip, trip_id)
+    if trip is None:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    result = await db.execute(
+        select(Booking).where(Booking.trip_id == trip_id).options(selectinload(Booking.approval))
+    )
+    bookings = result.scalars().all()
+    read_rows = []
+    for booking in bookings:
+        assert booking.approval is not None  # propose_booking() always creates one
+        read_rows.append(
+            BookingRead(
+                booking_id=booking.id,
+                booking_type=booking.booking_type,
+                status=booking.status,
+                total_price_usd=booking.total_price_usd,
+                provider_booking_reference=booking.provider_booking_reference,
+                failure_reason=booking.failure_reason,
+                approval_id=booking.approval.id,
+                approval_decision=booking.approval.decision,
+            )
+        )
+    return read_rows
 
 
 @app.post("/trips/{trip_id}/proceed", response_model=TripProceedResponse)
