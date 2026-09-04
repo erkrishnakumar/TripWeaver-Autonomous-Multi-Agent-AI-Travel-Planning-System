@@ -32,7 +32,7 @@ tripweaver/
 │   │                    #   job instead of blocking an HTTP request
 │   ├── auth/            # JWT issuance/verification + bcrypt password hashing +
 │   │                    #   single-use reset tokens (see docs/Auth_Requirement.md)
-│   ├── email/           # Real password-reset email delivery via Resend
+│   ├── email/           # Real email delivery via Resend: password reset + booking-confirmed
 │   ├── db/              # SQLAlchemy models (Trip, Booking, Approval, ...) + async session
 │   ├── logging_config.py # One shared structured-logging setup for API/worker/CLI
 │   └── config.py        # Centralized settings (env vars) — see Local setup below
@@ -41,7 +41,7 @@ tripweaver/
 ├── alembic/              # Alembic migration environment + versions
 ├── docs/                 # Design docs, roadmap, incident writeups (see Documentation below)
 │                         #   NOTE: docs/ is intentionally excluded from git — see below
-├── tests/                # Unit + integration tests (251 passing)
+├── tests/                # Unit + integration tests (253 passing)
 ├── .github/workflows/    # CI: backend (ruff, mypy, pytest) + frontend (oxlint, tsc, build)
 ├── .pre-commit-config.yaml  # Local pre-commit hooks (ruff check --fix + ruff format)
 ├── Dockerfile             # One image, two roles (api/worker) -- see docker-compose.yml
@@ -115,13 +115,18 @@ be there.
      flow and the frontend keeps the token in memory only (never
      `localStorage`), so a page reload requires logging in again rather than
      leaving a bearer token somewhere an injected script could read it.
-   - `RESEND_API_KEY` — optional; sends the real `POST /auth/forgot-password`
-     email via [Resend](https://resend.com) (free tier available). Left
-     empty, that endpoint falls back to returning the reset token directly
-     in its response instead — fine for local dev, not how it's meant to
-     work with this set. Resend's free tier (no verified domain) only
-     delivers to the email address your Resend account itself is
-     registered under.
+   - `RESEND_API_KEY` — optional; sends two real emails via
+     [Resend](https://resend.com) (free tier available): `POST
+     /auth/forgot-password`'s reset link, and a booking-confirmed email
+     (traveler's own address — passenger email for flights, `contact_email`
+     for hotels, driver email for cars) the moment `POST
+     /approvals/{id}/confirm` actually books something with the provider.
+     Left empty, forgot-password falls back to returning the reset token
+     directly in its response instead (fine for local dev); the booking
+     confirmation email is just skipped entirely, since a real booking must
+     never be reported as failed over a missing/failed notification. Resend's
+     free tier (no verified domain) only delivers to the email address your
+     Resend account itself is registered under.
 
 4. Install the pre-commit hooks (runs `ruff check --fix` + `ruff format` on
    every commit):
@@ -323,13 +328,13 @@ disk but are not in the GitHub repo:
 - [x] Phase 2: MCP server wrapping (11 tools) — every tool now requires the same JWT bearer token the HTTP API issues, and MCP-created trips are owned by the authenticated caller
 - [x] Phase 2.1: ground transport cost estimation
 - [x] Phase 3: CrewAI agents + Flow with human-approval gate
-- [x] Phase 4: Gate 1 + Gate 2 (`propose_booking()`/`confirm_booking()`/`reject_booking()`) — done, live-verified against the real Duffel sandbox **through the actual running HTTP API**, not just direct function calls (real flight order, reference `VFZC6E`)
+- [x] Phase 4: Gate 1 + Gate 2 (`propose_booking()`/`confirm_booking()`/`reject_booking()`) — done, live-verified against the real Duffel sandbox **through the actual running HTTP API**, not just direct function calls (real flight order, reference `VFZC6E`). Hardened further after a live run: the formatter agent is instructed to omit `selected_hotel` entirely when it never got a real `search_result_id`, but a model doesn't always follow that faithfully — it can report the object anyway with a blank id. `flow.py`'s propose step now checks for that explicitly instead of trusting the prompt alone, so a blank id is skipped with a clear audit-log error rather than burning a doomed provider API call.
 - [x] Phase 5: Postgres persistence — verified live against real Postgres
 - [🟡] Phase 6: observability — `GET /trips/{id}/bookings` and `GET /trips/{id}/audit-log` expose what was previously only visible via a raw DB query. Structured logging (`app/logging_config.py`, every line tagged `[trip=<uuid>]` across the API, worker, and CLI processes) is done and live-verified. Tracing and per-run cost tracking are still open.
 - [x] Phase 7 (v1): agent evals — recorded real LLM/provider failure modes as deterministic regression tests. **Still open**: live-LLM-output-quality evals
-- [x] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, `GET /trips/{id}/bookings`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are all built and live-verified end to end against the real Duffel sandbox. Car rental confirmation now works too, via the frontend's Duffel card-tokenization flow (see `docs/Car_Rental_Payment_Gap.md` §5). **Auth is now built and enforced**: `POST /auth/register`/`login` issue stateless JWT bearer tokens, `POST /auth/forgot-password`/`reset-password` support account recovery with real email delivery via Resend (falls back to returning the token directly only when `RESEND_API_KEY` isn't configured), and every trip/approval endpoint requires a token plus checks per-user ownership (see `docs/Auth_Requirement.md`).
+- [x] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, `GET /trips/{id}/bookings`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are all built and live-verified end to end against the real Duffel sandbox. Car rental confirmation now works too, via the frontend's Duffel card-tokenization flow (see `docs/Car_Rental_Payment_Gap.md` §5). A real Gate 2 confirmation now also sends the traveler a booking-confirmed email via Resend (best-effort — a notification failure never turns a real, already-committed booking into a reported failure). **Auth is now built and enforced**: `POST /auth/register`/`login` issue stateless JWT bearer tokens (`GET`/`PATCH /auth/me` for reading and updating the caller's own profile — currently just a display name), `POST /auth/forgot-password`/`reset-password` support account recovery with real email delivery via Resend (falls back to returning the token directly only when `RESEND_API_KEY` isn't configured), and every trip/approval endpoint requires a token plus checks per-user ownership (see `docs/Auth_Requirement.md`).
 - [x] Phase 9: deployment — the full stack (API, worker, Postgres, Valkey) runs in Docker via `docker-compose.yml`, with a `docker-compose.prod.yml` overlay and Valkey-backed rate limiting (`slowapi`). Live-verified with real containers, not just built. Deliberately out of scope for now: multi-replica scaling, a real secrets manager, TLS termination.
-- [🟡] Phase 10: frontend — React 19 + Vite + TypeScript + Tailwind SPA under `frontend/`: login/register/forgot-reset-password, an `/auth/me` profile view, trip creation, trip detail with the audit-log activity feed, and per-booking-type approval dialogs including the Duffel card form for car rentals. Token is held **in memory only** (never `localStorage`) as deliberate XSS hardening. Still open: the card form's actual card-entry step hasn't been manually verified in a real browser (an automated browser got a blank Duffel card-vault iframe, most likely that hosted page's own anti-automation behavior).
+- [🟡] Phase 10: frontend — React 19 + Vite + TypeScript + Tailwind SPA under `frontend/`: login/register (with live password-strength feedback and a show/hide toggle) /forgot-reset-password, a profile menu backed by `/auth/me` that supports editing your display name, trip creation, and trip detail with a **live per-stage research progress tracker** (flight → hotel → car rental → context → format, driven by real `research.{stage}_completed` audit events emitted from a CrewAI `task_callback` — not a simulated progress bar) plus the audit-log activity feed and per-booking-type approval dialogs including the Duffel card form for car rentals. A local, per-browser "recent trips" shortcut list (there's no `GET /trips` list endpoint yet) supports removing entries. Gate 1 approval shows an immediate "verifying and proposing" state and keeps polling through the `awaiting_approval → approved/failed` window instead of appearing to hang while `propose_trip_bookings` runs in the background. Token is held **in memory only** (never `localStorage`) as deliberate XSS hardening — a full page reload always requires logging in again. Still open: the card form's actual card-entry step hasn't been manually verified in a real browser (an automated browser got a blank Duffel card-vault iframe, most likely that hosted page's own anti-automation behavior).
 
 See `docs/TripWeaver_Roadmap.md` for the full breakdown, including known open items.
 
