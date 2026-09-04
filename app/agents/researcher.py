@@ -75,6 +75,7 @@ def build_researcher_llm(provider: str | None = None, temperature: float | None 
         model=f"ollama/{settings.ollama_model}",
         base_url=settings.ollama_base_url,
         temperature=temperature,
+        timeout=settings.ollama_timeout,
     )
 
 

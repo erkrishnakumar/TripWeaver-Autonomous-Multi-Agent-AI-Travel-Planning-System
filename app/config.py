@@ -86,6 +86,8 @@ class Settings:
 
     ollama_base_url: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     ollama_model: str = os.environ.get("OLLAMA_MODEL", "llama3.1")
+    ollama_timeout: int = int(os.environ.get("OLLAMA_LLM_TIMEOUT", "300"))
+    ollama_keep_alive: str = os.environ.get("OLLAMA_KEEP_ALIVE", "-1")
 
     groq_api_key: str = os.environ.get("GROQ_API_KEY", "")
     # Only used when LLM_PROVIDER=groq (agent reasoning) -- distinct from
