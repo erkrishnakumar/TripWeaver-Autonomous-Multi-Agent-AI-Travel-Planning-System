@@ -58,23 +58,26 @@ actually gets enforced at the code level, not just described in prose.
 @listen  check_budget()          → plain Python: app.agents.budget.validate_budget()
 @listen  plan()                  → kicks off build_planning_crew() (LLM, no tools)
 @listen  persist_draft_trip()    → plain Python: app.tools.create_trip.create_trip()
-@listen  wait_for_human_approval → *** PHASE 8 PLACEHOLDER *** — blocking CLI input()
+@listen  wait_for_human_approval → *** CLI-ONLY DEMO PATH *** — blocking CLI input()
 @listen  propose_bookings()      → plain Python: app.tools.propose_booking.propose_booking(),
                                     ONLY if approved == True
 ```
 
-`wait_for_human_approval` is explicitly a local-dev stand-in for the real
-approval mechanism Phase 8's API layer is supposed to provide (a separate
-`POST /approvals/{id}/confirm|reject` endpoint). When Phase 8 exists,
-replace this method's *trigger mechanism* — not the gate itself, which
-must remain permanent.
+`wait_for_human_approval` was originally a Phase 8 placeholder for the real
+approval mechanism; Phase 8 has since shipped (`POST /approvals/{id}/
+confirm|reject`, see `app/api/main.py`), so this method now only matters
+for the standalone CLI entrypoint (`uv run python -m app.agents.flow`) —
+the real, production trigger is the API endpoint calling
+`confirm_booking()`/`reject_booking()` directly (`app/tools/confirm_booking.py`),
+never this method. Kept for local-dev/demo use, not deleted, since the
+gate itself remains permanent regardless of which surface triggers it.
 
 **Still never books anything for real, even after approval.**
 `propose_bookings()` only ever calls `propose_booking()`, which writes
 `PENDING_APPROVAL` rows — never a real provider booking endpoint. The
 Flow's "approval" is approval to *propose* a booking for a second,
-separate, human-triggered confirmation later (Phase 8) — not approval to
-actually book.
+separate, human-triggered confirmation later (`POST /approvals/{id}/confirm`)
+— not approval to actually book.
 
 ## A real CrewAI gotcha, caught and fixed here
 
@@ -119,7 +122,8 @@ runs for real, same principle as `tests/test_mcp_server.py` and
 
 ## Not done in Phase 3 (tracked, not forgotten)
 
-- No real approval mechanism — see the Phase 8 placeholder note above.
+- ~~No real approval mechanism~~ — **shipped in Phase 8**, see the note
+  above; only the CLI entrypoint still uses the blocking `input()` prompt.
 - No retry/error-recovery strategy if `Crew.kickoff()` itself raises
   (e.g. Ollama unreachable) — currently an uncaught exception would
   propagate out of `flow.kickoff()`. Worth revisiting once Phase 6

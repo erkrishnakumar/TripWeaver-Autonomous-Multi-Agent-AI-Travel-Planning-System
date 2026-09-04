@@ -15,21 +15,24 @@ before anything is ever actually booked" principle exists to prevent —
 see app/agents/tools.py's module docstring for the tool-layer side of this
 same decision.
 
-PHASE 8 PLACEHOLDER, NOT A REAL APPROVAL MECHANISM:
+CLI-ONLY DEMO PATH, NOT THE REAL APPROVAL TRIGGER:
 wait_for_human_approval() below uses a blocking CLI input() prompt. This
-is explicitly a local-dev/demo stand-in for the real approval mechanism
-that Phase 8's API layer is supposed to provide (a separate, human-
-triggered POST /approvals/{id}/confirm|reject endpoint, per the roadmap's
-Phase 4 notes). When Phase 8 exists, this method should be replaced with
-something that actually waits on that endpoint being called (e.g. polling
-the Approval row, or a webhook) — not deleted, since the gate itself must
-remain permanent; only its trigger mechanism changes.
+was originally a Phase 8 placeholder for the real approval mechanism; Phase
+8 has since shipped (POST /approvals/{id}/confirm|reject, see app/api/main.py
+and docs/TripWeaver_Roadmap.md), so this method now only matters for the
+standalone CLI entrypoint (`uv run python -m app.agents.flow`) — the real,
+production trigger is the API endpoint calling confirm_booking()/
+reject_booking() directly (app/tools/confirm_booking.py), never this
+method. Kept for local-dev/demo use, not deleted, since the gate itself
+(propose, then wait for a separate human decision) remains permanent
+regardless of which surface triggers it.
 
 STILL NEVER BOOKS ANYTHING FOR REAL: even after human approval, this Flow
 only calls propose_booking() — which writes PENDING_APPROVAL rows, never a
 real provider booking endpoint (see app/tools/propose_booking.py). This
 Flow's "approval" is approval to PROPOSE a booking for a second, separate,
-human-triggered confirmation later (Phase 8) — not approval to book.
+human-triggered confirmation later (POST /approvals/{id}/confirm) — not
+approval to book.
 
 HALLUCINATION GUARD, NOT JUST A PRICE REFRESH: propose_bookings() below
 NEVER proposes a flight/hotel/car rental using the FlightOffer/HotelListing/
@@ -419,14 +422,15 @@ class TripPlanningFlow(Flow[TripPlanningState]):
         return cast(str, self.state.trip_id)
 
     def wait_for_human_approval(self, trip_id: str) -> bool:
-        """*** PHASE 8 PLACEHOLDER — SEE MODULE DOCSTRING ***
+        """*** CLI-ONLY DEMO PATH — SEE MODULE DOCSTRING ***
 
-        Blocking CLI prompt standing in for a real, separate, human-
-        triggered approval mechanism. Shows the plan and budget verdict,
-        and requires an explicit 'y' to proceed — anything else (including
-        just pressing enter) is treated as a rejection, not a default
-        approval, since a human-approval gate that defaults to "yes" isn't
-        one.
+        Blocking CLI prompt used only by the standalone CLI entrypoint; the
+        real, production approval trigger is POST /approvals/{id}/confirm|
+        reject (see app/api/main.py), which never calls this method. Shows
+        the plan and budget verdict, and requires an explicit 'y' to
+        proceed — anything else (including just pressing enter) is treated
+        as a rejection, not a default approval, since a human-approval gate
+        that defaults to "yes" isn't one.
         """
         plan = self.state.plan
         budget = self.state.budget_check
