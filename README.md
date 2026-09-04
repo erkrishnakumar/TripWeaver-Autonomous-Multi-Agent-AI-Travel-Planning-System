@@ -20,24 +20,29 @@ tripweaver/
 │   │   ├── schemas.py           # Pydantic contracts shared by tools/agents/mcp_server/api
 │   │   ├── propose_booking.py   # Gate 1: writes PENDING_APPROVAL, never books for real
 │   │   ├── confirm_booking.py   # Gate 2: the ONLY code path allowed to call a real
-│   │   │                        #   provider booking endpoint (flights/hotels; cars
-│   │   │                        #   are not yet supported here — see docs below)
+│   │   │                        #   provider booking endpoint (flights, hotels, and
+│   │   │                        #   cars — the last needs a card payment token)
 │   │   └── fixtures/            # Local JSON fixtures for USE_MOCK_DATA=true
-│   ├── mcp_server/      # FastMCP server exposing the tool layer as MCP tools (Phase 2)
-│   ├── api/             # FastAPI app: trip creation, status, Gate 1 (proceed) and
-│   │                    #   Gate 2 (confirm/reject) endpoints (Phase 8, in progress)
+│   ├── mcp_server/      # FastMCP server exposing the tool layer as MCP tools (Phase 2).
+│   │                    #   Every tool requires the same JWT bearer token the API issues
+│   ├── api/             # FastAPI app: auth, trip creation, status, Gate 1 (proceed) and
+│   │                    #   Gate 2 (confirm/reject) endpoints (Phase 8)
 │   ├── worker/          # Celery tasks (run_trip_planning, propose_trip_bookings) +
 │   │                    #   Celery app config — runs the CrewAI Flow as a background
 │   │                    #   job instead of blocking an HTTP request
-│   ├── auth/            # Password hashing (bcrypt) — auth foundation, not yet wired
-│   │                    #   into any endpoint (see docs/Auth_Requirement.md)
+│   ├── auth/            # JWT issuance/verification + bcrypt password hashing +
+│   │                    #   single-use reset tokens (see docs/Auth_Requirement.md)
+│   ├── email/           # Real password-reset email delivery via Resend
 │   ├── db/              # SQLAlchemy models (Trip, Booking, Approval, ...) + async session
+│   ├── logging_config.py # One shared structured-logging setup for API/worker/CLI
 │   └── config.py        # Centralized settings (env vars) — see Local setup below
+├── frontend/             # React 19 + Vite + TypeScript + Tailwind SPA: auth, trip
+│                         #   creation/detail, approval dialogs, Duffel card form (Phase 10)
 ├── alembic/              # Alembic migration environment + versions
 ├── docs/                 # Design docs, roadmap, incident writeups (see Documentation below)
 │                         #   NOTE: docs/ is intentionally excluded from git — see below
-├── tests/                # Unit + integration tests (232 passing)
-├── .github/workflows/    # CI pipeline (ruff, mypy, pytest)
+├── tests/                # Unit + integration tests (251 passing)
+├── .github/workflows/    # CI: backend (ruff, mypy, pytest) + frontend (oxlint, tsc, build)
 ├── .pre-commit-config.yaml  # Local pre-commit hooks (ruff check --fix + ruff format)
 ├── Dockerfile             # One image, two roles (api/worker) -- see docker-compose.yml
 ├── docker-compose.yml    # Full stack: postgres, valkey, migrate (one-off), api, worker
@@ -105,8 +110,11 @@ be there.
      will work; the app refuses to sign/verify a token with an empty
      secret. Generate one with
      `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
-     `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` (default `1440`, i.e. 24h) controls
-     how long a token stays valid.
+     `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` (default `30`) controls how long a
+     token stays valid — deliberately short, since there's no refresh-token
+     flow and the frontend keeps the token in memory only (never
+     `localStorage`), so a page reload requires logging in again rather than
+     leaving a bearer token somewhere an injected script could read it.
    - `RESEND_API_KEY` — optional; sends the real `POST /auth/forgot-password`
      email via [Resend](https://resend.com) (free tier available). Left
      empty, that endpoint falls back to returning the reset token directly
@@ -189,6 +197,18 @@ The Gate 1 → Gate 2 sequence itself is live-verified against the real
 Duffel sandbox through the actual running API (not just as direct function
 calls) — see `docs/Gate2_Live_Verification.md` §5.
 
+Run the frontend (expects the API on `http://localhost:8000`, overridable
+via `VITE_API_BASE_URL` in `frontend/.env.local`):
+```bash
+cd frontend
+npm install
+npm run dev          # http://localhost:5173
+```
+The API's `CORS_ALLOWED_ORIGINS` already includes the Vite dev server's
+default origin. Because the frontend holds its bearer token in memory only,
+a hard reload always sends you back to the login page — that's deliberate,
+not a bug.
+
 **Windows note**: if you restart the Celery worker (e.g. to change env
 vars), verify only one is left running with
 `uv run celery -A app.worker.celery_app inspect ping` before creating a new
@@ -253,13 +273,21 @@ uv run pytest tests -v
 
 ## Code quality
 
-Three checks run both locally (pre-commit, on every commit) and in CI (on
-every push/PR to `main`):
+Three backend checks run both locally (pre-commit, on every commit) and in
+CI (on every push/PR to `main`):
 
 ```bash
 uv run ruff check .          # lint
 uv run ruff format --check . # formatting
 uv run mypy app/              # strict-mode static type checking
+```
+
+CI runs the frontend's own checks as a second, parallel job:
+
+```bash
+cd frontend
+npm run lint    # oxlint
+npm run build   # tsc -b (type check) + vite build
 ```
 
 See `docs/CI_Mypy_Ruff_Rationale.md` for why each of these matters for this
@@ -272,11 +300,13 @@ a real mypy/CI incident and fix.
 disk but are not in the GitHub repo:
 
 - `docs/TripWeaver_Roadmap.md` — phase-by-phase project status, what's done, what's open
+- `docs/TripWeaver_Technical_Deep_Dive.md` — a full technical walkthrough of the whole system (architecture, request lifecycle, every layer, engineering decisions, real problems hit and how they were solved), written for explaining the project end to end
+- `docs/TripWeaver_Project_Scope.md` — what the system does and doesn't do, with everything labelled implemented / partially implemented / out of scope / future
 - `docs/Flight_And_Hotel_Real_Booking_Documentation.md` — live sandbox verification of `create_flight_order()`/`create_hotel_booking()`
 - `docs/Car_Rentals_Documentation.md` — the Duffel Cars rollout: search/quote/book contract, real bugs found
-- `docs/Car_Rental_Payment_Gap.md` — why car rental bookings can't be confirmed yet (Duffel requires a tokenized card; no frontend exists) and the full resolution plan
+- `docs/Car_Rental_Payment_Gap.md` — why car rental bookings originally couldn't be confirmed (Duffel Cars requires a tokenized card, unlike Flights/Stays) and §5's writeup of how the client-side card-tokenization flow resolved it
 - `docs/Gate2_Live_Verification.md` — live end-to-end verification of `confirm_booking()`/`reject_booking()` against the real Duffel sandbox
-- `docs/Multi_Car_Rental_Extension.md` — design for supporting more than one car rental per trip (not yet built)
+- `docs/Multi_Car_Rental_Extension.md` — the design for supporting more than one car rental per trip (now built)
 - `docs/Auth_Requirement.md` — why authentication is a standing compliance requirement (Duffel's own service agreement), and what's built so far
 - `docs/MCP_Server_Documentation.md` — MCP server design rationale
 - `docs/TripWeaver_Two_Layer_Testing_and_CI.md` — the two-layer testing/CI system, how it's structured
@@ -290,14 +320,20 @@ disk but are not in the GitHub repo:
 
 - [x] Phase 0: repo scaffold, schemas
 - [x] Phase 1: tool layer (`search_flights`, `get_weather_forecast`, `search_hotels`, `search_car_rentals`, `check_visa_requirements`, `propose_booking`/`create_trip`)
-- [x] Phase 2: MCP server wrapping (11 tools)
+- [x] Phase 2: MCP server wrapping (11 tools) — every tool now requires the same JWT bearer token the HTTP API issues, and MCP-created trips are owned by the authenticated caller
 - [x] Phase 2.1: ground transport cost estimation
 - [x] Phase 3: CrewAI agents + Flow with human-approval gate
 - [x] Phase 4: Gate 1 + Gate 2 (`propose_booking()`/`confirm_booking()`/`reject_booking()`) — done, live-verified against the real Duffel sandbox **through the actual running HTTP API**, not just direct function calls (real flight order, reference `VFZC6E`)
 - [x] Phase 5: Postgres persistence — verified live against real Postgres
 - [🟡] Phase 6: observability — `GET /trips/{id}/bookings` and `GET /trips/{id}/audit-log` expose what was previously only visible via a raw DB query. Structured logging (`app/logging_config.py`, every line tagged `[trip=<uuid>]` across the API, worker, and CLI processes) is done and live-verified. Tracing and per-run cost tracking are still open.
 - [x] Phase 7 (v1): agent evals — recorded real LLM/provider failure modes as deterministic regression tests. **Still open**: live-LLM-output-quality evals
-- [x] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, `GET /trips/{id}/bookings`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are all built and live-verified end to end against the real Duffel sandbox. Car rental confirmation is explicitly unsupported pending a card-tokenization frontend (see `docs/Car_Rental_Payment_Gap.md`). **Auth is now built and enforced**: `POST /auth/register`/`login` issue stateless JWT bearer tokens, `POST /auth/forgot-password`/`reset-password` support account recovery with real email delivery via Resend (falls back to returning the token directly only when `RESEND_API_KEY` isn't configured), and every trip/approval endpoint requires a token plus checks per-user ownership (see `docs/Auth_Requirement.md`).
+- [x] Phase 8: API layer — `POST /trips`, `GET /trips/{id}`, `GET /trips/{id}/bookings`, Gate 1 (`/proceed`), and **Gate 2** (`POST /approvals/{id}/confirm|reject`) are all built and live-verified end to end against the real Duffel sandbox. Car rental confirmation now works too, via the frontend's Duffel card-tokenization flow (see `docs/Car_Rental_Payment_Gap.md` §5). **Auth is now built and enforced**: `POST /auth/register`/`login` issue stateless JWT bearer tokens, `POST /auth/forgot-password`/`reset-password` support account recovery with real email delivery via Resend (falls back to returning the token directly only when `RESEND_API_KEY` isn't configured), and every trip/approval endpoint requires a token plus checks per-user ownership (see `docs/Auth_Requirement.md`).
 - [x] Phase 9: deployment — the full stack (API, worker, Postgres, Valkey) runs in Docker via `docker-compose.yml`, with a `docker-compose.prod.yml` overlay and Valkey-backed rate limiting (`slowapi`). Live-verified with real containers, not just built. Deliberately out of scope for now: multi-replica scaling, a real secrets manager, TLS termination.
+- [🟡] Phase 10: frontend — React 19 + Vite + TypeScript + Tailwind SPA under `frontend/`: login/register/forgot-reset-password, an `/auth/me` profile view, trip creation, trip detail with the audit-log activity feed, and per-booking-type approval dialogs including the Duffel card form for car rentals. Token is held **in memory only** (never `localStorage`) as deliberate XSS hardening. Still open: the card form's actual card-entry step hasn't been manually verified in a real browser (an automated browser got a blank Duffel card-vault iframe, most likely that hosted page's own anti-automation behavior).
 
 See `docs/TripWeaver_Roadmap.md` for the full breakdown, including known open items.
+
+Two documents aimed at explaining this project rather than building it:
+`docs/TripWeaver_Technical_Deep_Dive.md` (a full technical walkthrough, for
+interviews) and `docs/TripWeaver_Project_Scope.md` (what is and isn't in
+scope, and what's genuinely future work).
