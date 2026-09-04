@@ -132,9 +132,11 @@ def get_weather_forecast_tool(
 ) -> str:
     """Get a daily weather forecast for a city or explicit lat/lon (give
     EITHER a city name OR both latitude and longitude, never both forms).
-    Only covers roughly the next 15 days — an ERROR result for dates
-    further out means the forecast isn't available yet, not that the tool
-    failed."""
+    A real forecast only covers roughly the next 15 days — for dates
+    further out, the result instead holds historical climate averages for
+    this time of year (is_climate_average will be true, with a disclaimer
+    field). That is NOT a real forecast: report it as a historical average
+    and relay the disclaimer verbatim, never as an actual prediction."""
     query = WeatherSearchInput(
         city=city,
         latitude=latitude,

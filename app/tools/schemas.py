@@ -128,7 +128,15 @@ class WeatherSearchInput(BaseModel):
 
 
 class DailyForecast(BaseModel):
-    """Forecast for a single calendar day."""
+    """Forecast for a single calendar day.
+
+    When WeatherForecastResult.is_climate_average is True, this is NOT a
+    forecast for this specific day -- see that field's docstring.
+    precipitation_probability_pct then means "% of sampled past years that
+    had measurable rain on this calendar day," not a single day's forecast
+    probability, and weather_code/weather_description is the most common
+    historical condition across those years, not a specific prediction.
+    """
 
     date: date
     temp_max_c: float
@@ -146,6 +154,23 @@ class WeatherForecastResult(BaseModel):
     longitude: float
     daily: list[DailyForecast]
     provider: str = "open-meteo"
+    is_climate_average: bool = Field(
+        default=False,
+        description=(
+            "True when the requested dates are beyond Open-Meteo's real "
+            "forecast horizon (~15 days) and `daily` holds historical "
+            "climate averages for this time of year instead of an actual "
+            "forecast -- see `disclaimer`."
+        ),
+    )
+    disclaimer: str | None = Field(
+        default=None,
+        description=(
+            "Non-null only when is_climate_average is True. Must be relayed "
+            "to the traveler verbatim alongside the numbers -- these are "
+            "historical averages, not a prediction for the real trip dates."
+        ),
+    )
 
 
 class ChildGuest(BaseModel):

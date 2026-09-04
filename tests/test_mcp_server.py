@@ -305,30 +305,70 @@ class TestGetWeatherForecastTool:
         assert result.data.resolved_location_name == "Atlanta, US"
         assert result.data.daily[0].weather_description == "Mainly clear"
 
-    async def test_forecast_range_exceeded_is_raised_with_real_message(self, monkeypatch):
+    async def test_tool_error_is_raised_with_real_message(self, monkeypatch):
         monkeypatch.setattr(
             server_module,
             "_get_weather_forecast",
             lambda query: DomainToolError(
                 tool_name="get_weather_forecast",
-                error_type="forecast_range_exceeded",
-                message="Weather forecasts are only available up to about 15 days out.",
+                error_type="location_not_found",
+                message="Couldn't find a location matching 'Nowhereville'.",
                 retryable=False,
             ),
         )
 
         async with Client(server_module.mcp) as client:
-            with pytest.raises(MCPToolError, match="forecast_range_exceeded"):
+            with pytest.raises(MCPToolError, match="location_not_found"):
                 await client.call_tool(
                     "get_weather_forecast",
                     {
                         "query": {
-                            "city": "Atlanta",
-                            "start_date": (date.today() + timedelta(days=60)).isoformat(),
-                            "end_date": (date.today() + timedelta(days=62)).isoformat(),
+                            "city": "Nowhereville",
+                            "start_date": (date.today() + timedelta(days=2)).isoformat(),
+                            "end_date": (date.today() + timedelta(days=3)).isoformat(),
                         }
                     },
                 )
+
+    async def test_climate_average_beyond_forecast_horizon_is_passed_through(self, monkeypatch):
+        """Beyond ~15 days out, get_weather_forecast() now returns a
+        successful WeatherForecastResult with is_climate_average=True
+        instead of a ToolError -- the MCP wrapper must pass that straight
+        through, not treat it as a failure."""
+        fake_result = WeatherForecastResult(
+            resolved_location_name="Atlanta, US",
+            latitude=33.75,
+            longitude=-84.39,
+            daily=[
+                DailyForecast(
+                    date=date.today() + timedelta(days=60),
+                    temp_max_c=22.0,
+                    temp_min_c=12.0,
+                    precipitation_probability_pct=20,
+                    weather_code=1,
+                    weather_description="Mainly clear",
+                )
+            ],
+            is_climate_average=True,
+            disclaimer="This is NOT a real weather forecast — historical averages only.",
+        )
+        monkeypatch.setattr(server_module, "_get_weather_forecast", lambda query: fake_result)
+
+        async with Client(server_module.mcp) as client:
+            result = await client.call_tool(
+                "get_weather_forecast",
+                {
+                    "query": {
+                        "city": "Atlanta",
+                        "start_date": (date.today() + timedelta(days=60)).isoformat(),
+                        "end_date": (date.today() + timedelta(days=60)).isoformat(),
+                    }
+                },
+            )
+
+        assert result.data.is_climate_average is True
+        assert result.data.disclaimer is not None
+        assert "NOT a real weather forecast" in result.data.disclaimer
 
 
 # ---------------------------------------------------------------------------

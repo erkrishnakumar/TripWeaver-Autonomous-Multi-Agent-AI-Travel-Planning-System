@@ -213,9 +213,13 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
             "The trip request does not include the traveler's passport country. "
             "If Check Visa Requirements needs it, do not guess a nationality — "
             "instead report that visa requirements are unknown without a passport "
-            "country. If the weather tool errors because the trip is too far out, "
-            "report that plainly rather than inventing a forecast. Report all "
-            "three findings in plain text; do not invent any of them."
+            "country. If the weather tool's result has is_climate_average set to "
+            "true, it is NOT a real forecast — it's a historical average for this "
+            "time of year. Report it as such and relay its disclaimer field "
+            "verbatim; never present it as an actual prediction for the trip dates. "
+            "If the weather tool errors outright, report that plainly rather than "
+            "inventing a forecast. Report all three findings in plain text; do not "
+            "invent any of them."
         ),
         expected_output=(
             "A plain-text weather summary, visa summary (or a note that it's "

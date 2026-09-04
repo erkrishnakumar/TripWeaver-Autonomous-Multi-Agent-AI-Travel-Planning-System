@@ -219,7 +219,11 @@ mcp = FastMCP(
     auth=_JWTBearerVerifier(),
     instructions=(
         "Travel-planning tools for TripWeaver. search_flights, search_hotels, and "
-        "get_weather_forecast are read-only lookups. check_visa_requirements returns an "
+        "get_weather_forecast are read-only lookups. get_weather_forecast falls back to "
+        "historical climate averages (result.is_climate_average=true) for dates beyond "
+        "its ~15-day real forecast horizon — always relay result.disclaimer verbatim in "
+        "that case and never present the numbers as an actual forecast. "
+        "check_visa_requirements returns an "
         "AI-generated, informational-only estimate — always relay its disclaimer field "
         "verbatim to the traveler, and treat a null visa_required as 'unknown, check an "
         "official source', not as a failure. create_trip starts a new trip and returns "
@@ -276,9 +280,11 @@ def search_flights(query: FlightSearchInput) -> FlightSearchResult:
 def get_weather_forecast(query: WeatherSearchInput) -> WeatherForecastResult:
     """Get a daily weather forecast for a city name or explicit lat/lon.
 
-    Only covers roughly the next 15 days out — dates beyond that return a
-    tool-call error explaining the limitation rather than a misleading or
-    empty result.
+    A real forecast only covers roughly the next 15 days out. Dates beyond
+    that return historical climate averages instead (result.is_climate_average
+    will be true) — NOT a real forecast. Always relay result.disclaimer to
+    the traveler verbatim in that case, and never present the numbers as an
+    actual prediction for the trip dates.
     """
     _current_user_id()
     return _unwrap(_get_weather_forecast(query))

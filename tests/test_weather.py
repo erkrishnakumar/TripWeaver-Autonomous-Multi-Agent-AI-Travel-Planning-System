@@ -47,6 +47,43 @@ MOCK_FORECAST_RESPONSE = {
 # regardless of query string, via regex instead.
 GEOCODE_URL_RE = re.compile(r"^https://geocoding-api\.open-meteo\.com/v1/search(\?.*)?$")
 FORECAST_URL_RE = re.compile(r"^https://api\.open-meteo\.com/v1/forecast(\?.*)?$")
+ARCHIVE_URL_RE = re.compile(r"^https://archive-api\.open-meteo\.com/v1/archive(\?.*)?$")
+
+
+def _archive_response_for_month_day(
+    month: int,
+    day: int,
+    *,
+    max_c: float,
+    min_c: float,
+    precip_mm: float,
+    code: int,
+    years: int = 10,
+) -> dict:
+    """Builds a fake multi-year archive-API response with the SAME
+    observed values repeated on the given month/day across `years`
+    consecutive past years -- enough for _climate_average_for_day() to
+    find every sample and average them (trivially, since they're all
+    identical here; TestClimateAverageVariesAcrossYears below covers a
+    genuinely varying sample)."""
+    end_year = date.today().year - 1
+    start_year = end_year - years + 1
+    time_, max_t, min_t, precip, codes = [], [], [], [], []
+    for year in range(start_year, end_year + 1):
+        time_.append(f"{year:04d}-{month:02d}-{day:02d}")
+        max_t.append(max_c)
+        min_t.append(min_c)
+        precip.append(precip_mm)
+        codes.append(code)
+    return {
+        "daily": {
+            "time": time_,
+            "temperature_2m_max": max_t,
+            "temperature_2m_min": min_t,
+            "precipitation_sum": precip,
+            "weather_code": codes,
+        }
+    }
 
 
 @pytest.fixture
@@ -144,24 +181,97 @@ def test_api_error_returns_tool_error_not_exception(httpx_mock, coord_query):
     assert result.retryable is False
 
 
-def test_dates_beyond_forecast_horizon_return_tool_error_without_network_call():
-    """No httpx_mock fixture used here on purpose — if the code accidentally
-    tried a real network call for out-of-range dates, this test would
-    hang/fail instead of hitting the intended fast, offline-safe early
-    return."""
-    query = WeatherSearchInput(
-        city="Atlanta",
-        start_date=date.today() + timedelta(days=40),
-        end_date=date.today() + timedelta(days=45),
-    )
+class TestClimateAverageFallback:
+    """Dates beyond the ~15-day real forecast horizon fall back to
+    historical climate averages (app/tools/weather.py's
+    _build_climate_average_result()) instead of just erroring out — this
+    is the COMMON case for real trip bookings, not an edge case."""
 
-    result = get_weather_forecast(query)
+    def test_beyond_horizon_returns_climate_average_not_an_error(self, httpx_mock, city_query):
+        target = date.today() + timedelta(days=40)
+        query = WeatherSearchInput(city="Atlanta", start_date=target, end_date=target)
+        httpx_mock.add_response(url=GEOCODE_URL_RE, json=MOCK_GEOCODE_RESPONSE, status_code=200)
+        httpx_mock.add_response(
+            url=ARCHIVE_URL_RE,
+            json=_archive_response_for_month_day(
+                target.month, target.day, max_c=28.0, min_c=18.0, precip_mm=0.0, code=1
+            ),
+            status_code=200,
+        )
 
-    assert isinstance(result, ToolError)
-    assert result.tool_name == "get_weather_forecast"
-    assert result.error_type == "forecast_range_exceeded"
-    assert result.retryable is False
-    assert "days out" in result.message
+        result = get_weather_forecast(query)
+
+        assert isinstance(result, WeatherForecastResult)
+        assert result.is_climate_average is True
+        assert result.disclaimer is not None
+        assert "NOT a real weather forecast" in result.disclaimer
+        assert len(result.daily) == 1
+        assert result.daily[0].date == target
+        assert result.daily[0].temp_max_c == 28.0
+        assert result.daily[0].temp_min_c == 18.0
+        assert result.daily[0].precipitation_probability_pct == 0
+        assert result.daily[0].weather_description == "Mainly clear"
+
+    def test_climate_average_covers_the_whole_requested_range(self, httpx_mock):
+        start = date.today() + timedelta(days=40)
+        end = start + timedelta(days=2)
+        query = WeatherSearchInput(
+            latitude=33.749, longitude=-84.388, start_date=start, end_date=end
+        )
+        # Build one archive response covering all three target month/days.
+        base = _archive_response_for_month_day(
+            start.month, start.day, max_c=20.0, min_c=10.0, precip_mm=0.0, code=0
+        )
+        for offset in (1, 2):
+            extra_day = start + timedelta(days=offset)
+            extra = _archive_response_for_month_day(
+                extra_day.month, extra_day.day, max_c=20.0, min_c=10.0, precip_mm=0.0, code=0
+            )
+            base["daily"]["time"] += extra["daily"]["time"]
+            base["daily"]["temperature_2m_max"] += extra["daily"]["temperature_2m_max"]
+            base["daily"]["temperature_2m_min"] += extra["daily"]["temperature_2m_min"]
+            base["daily"]["precipitation_sum"] += extra["daily"]["precipitation_sum"]
+            base["daily"]["weather_code"] += extra["daily"]["weather_code"]
+        httpx_mock.add_response(url=ARCHIVE_URL_RE, json=base, status_code=200)
+
+        result = get_weather_forecast(query)
+
+        assert isinstance(result, WeatherForecastResult)
+        assert [d.date for d in result.daily] == [start, start + timedelta(days=1), end]
+
+    def test_rainy_fraction_reflects_how_many_sampled_years_had_rain(self, httpx_mock, coord_query):
+        target = date.today() + timedelta(days=40)
+        query = WeatherSearchInput(
+            latitude=33.749, longitude=-84.388, start_date=target, end_date=target
+        )
+        response = _archive_response_for_month_day(
+            target.month, target.day, max_c=25.0, min_c=15.0, precip_mm=0.0, code=1, years=10
+        )
+        # Half the sampled years had measurable rain, half didn't.
+        for i in range(0, 10, 2):
+            response["daily"]["precipitation_sum"][i] = 5.0
+        httpx_mock.add_response(url=ARCHIVE_URL_RE, json=response, status_code=200)
+
+        result = get_weather_forecast(query)
+
+        assert isinstance(result, WeatherForecastResult)
+        assert result.daily[0].precipitation_probability_pct == 50
+
+    def test_archive_api_error_returns_tool_error(self, httpx_mock, coord_query):
+        target = date.today() + timedelta(days=40)
+        query = WeatherSearchInput(
+            latitude=33.749, longitude=-84.388, start_date=target, end_date=target
+        )
+        httpx_mock.add_response(
+            url=ARCHIVE_URL_RE, status_code=400, json={"reason": "invalid parameter"}
+        )
+
+        result = get_weather_forecast(query)
+
+        assert isinstance(result, ToolError)
+        assert result.tool_name == "get_weather_forecast"
+        assert result.error_type == "open_meteo_api_error"
+        assert result.retryable is False
 
 
 def test_rejects_end_date_before_start_date():
