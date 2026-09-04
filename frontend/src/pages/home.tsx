@@ -1,5 +1,5 @@
 import { useMutation, useQueries } from '@tanstack/react-query'
-import { ArrowRight, MapPinned, Plane, Sparkles } from 'lucide-react'
+import { ArrowRight, MapPinned, Plane, Sparkles, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { StatusBadge } from '@/components/status-badge'
 import { extractErrorMessage, tripsApi } from '@/lib/api'
-import { getTripHistory, rememberTrip } from '@/lib/trip-history'
+import { forgetTrip, getTripHistory, rememberTrip } from '@/lib/trip-history'
 import type { TripCreate } from '@/lib/types'
 
 const emptyForm: TripCreate = {
@@ -27,8 +27,13 @@ export function HomePage() {
   const navigate = useNavigate()
   const [form, setForm] = useState<TripCreate>(emptyForm)
   const [jumpToId, setJumpToId] = useState('')
+  const [tripHistory, setTripHistory] = useState<string[]>(() => getTripHistory())
 
-  const tripHistory = getTripHistory()
+  const handleForget = (id: string) => {
+    forgetTrip(id)
+    setTripHistory(getTripHistory())
+  }
+
   const historyQueries = useQueries({
     queries: tripHistory.map((id) => ({
       queryKey: ['trip', id],
@@ -219,26 +224,40 @@ export function HomePage() {
               const q = historyQueries[i]
               const trip = q?.data
               return (
-                <button
+                <div
                   key={id}
-                  onClick={() => navigate(`/trips/${id}`)}
-                  className="group flex items-center justify-between gap-4 rounded-lg -mx-2 px-2 py-3 text-left transition-colors hover:bg-muted/60"
+                  className="group flex items-center justify-between gap-4 rounded-lg -mx-2 px-2 py-1 transition-colors hover:bg-muted/60"
                 >
-                  <div className="flex items-center gap-3">
-                    <span className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10 text-primary transition-transform group-hover:scale-105">
+                  <button
+                    onClick={() => navigate(`/trips/${id}`)}
+                    className="flex min-w-0 flex-1 items-center gap-3 py-2 text-left"
+                  >
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary transition-transform group-hover:scale-105">
                       <Plane className="h-4 w-4" />
                     </span>
-                    <div>
-                      <p className="font-medium">
+                    <div className="min-w-0">
+                      <p className="truncate font-medium">
                         {trip ? `${trip.origin_iata} → ${trip.destination_iata}` : id}
                       </p>
                       <p className="text-xs text-muted-foreground">
                         {trip ? trip.depart_date : q?.isError ? 'Not found' : 'Loading…'}
                       </p>
                     </div>
+                  </button>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {trip && <StatusBadge status={trip.status} />}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleForget(id)
+                      }}
+                      aria-label="Remove from recent trips"
+                      className="rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
                   </div>
-                  {trip && <StatusBadge status={trip.status} />}
-                </button>
+                </div>
               )
             })}
           </CardContent>
