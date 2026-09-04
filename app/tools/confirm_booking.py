@@ -31,13 +31,16 @@ that flow needs) -- a raw card number never reaches this backend at all.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Approval, Booking, CarRentalOption, FlightOption, HotelOption
+from app.config import settings
+from app.db.models import Approval, Booking, CarRentalOption, FlightOption, HotelOption, Trip
 from app.db.models.enums import ApprovalDecision, BookingStatus, BookingType
+from app.email.send_email import EmailSendError, send_booking_confirmation_email
 from app.tools.audit import log_stage_event
 from app.tools.car_rentals import create_car_rental_booking, get_car_rental_quote
 from app.tools.flights import create_flight_order, get_flight_offer
@@ -50,6 +53,8 @@ from app.tools.schemas import (
     PassengerDetails,
     ToolError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def _load_approval_and_booking(
@@ -210,7 +215,9 @@ async def confirm_booking(
             or car_booking.get("booking_reference")
             or car_booking.get("id", "")
         )
-        return await _succeed_booking(session, booking, approval, reference, decided_by)
+        return await _succeed_booking(
+            session, booking, approval, reference, decided_by, notify_email=driver.email
+        )
 
     if booking.booking_type == BookingType.FLIGHT:
         if not passengers:
@@ -234,7 +241,9 @@ async def confirm_booking(
         reference = str(
             order.get("booking_reference") or order.get("reference") or order.get("id", "")
         )
-        return await _succeed_booking(session, booking, approval, reference, decided_by)
+        return await _succeed_booking(
+            session, booking, approval, reference, decided_by, notify_email=passengers[0].email
+        )
 
     # HOTEL
     if not guests or not contact_email or not contact_phone_number:
@@ -278,7 +287,9 @@ async def confirm_booking(
         or stays_booking.get("booking_reference")
         or stays_booking.get("id", "")
     )
-    return await _succeed_booking(session, booking, approval, reference, decided_by)
+    return await _succeed_booking(
+        session, booking, approval, reference, decided_by, notify_email=contact_email
+    )
 
 
 async def _succeed_booking(
@@ -287,6 +298,8 @@ async def _succeed_booking(
     approval: Approval,
     provider_booking_reference: str,
     decided_by: str | None,
+    *,
+    notify_email: str,
 ) -> BookingDecisionResult:
     booking.status = BookingStatus.BOOKED
     booking.provider_booking_reference = provider_booking_reference
@@ -305,6 +318,27 @@ async def _succeed_booking(
         booking_id=str(booking.id),
     )
     await session.commit()
+
+    # Best-effort only: the booking above is already real and committed --
+    # a Resend outage or bad key must never make a successful provider
+    # booking look failed to the caller, so this is logged and swallowed,
+    # never raised. Skipped entirely (not even attempted) when Resend isn't
+    # configured at all, same dev-mode posture as forgot-password.
+    if settings.resend_api_key:
+        trip = await session.get(Trip, booking.trip_id)
+        if trip is not None:
+            try:
+                send_booking_confirmation_email(
+                    notify_email,
+                    booking.booking_type.value,
+                    trip.origin_iata,
+                    trip.destination_iata,
+                    provider_booking_reference,
+                )
+            except EmailSendError:
+                logger.exception(
+                    "Failed to send booking confirmation email for booking %s", booking.id
+                )
 
     return BookingDecisionResult(
         booking_id=str(booking.id),

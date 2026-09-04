@@ -61,3 +61,42 @@ def send_password_reset_email(to_email: str, reset_token: str) -> None:
         raise EmailSendError(f"Resend API call failed: {e}") from e
 
     logger.info("Password reset email sent")
+
+
+def send_booking_confirmation_email(
+    to_email: str,
+    booking_type: str,
+    origin_iata: str,
+    destination_iata: str,
+    provider_booking_reference: str,
+) -> None:
+    """Sends the real booking-confirmed email -- the "future notification"
+    this module's own docstring anticipated. Raises EmailSendError on any
+    failure; unlike password reset, the caller (confirm_booking.py's
+    _succeed_booking()) does NOT need to disguise that failure with a
+    generic response -- the booking itself already succeeded for real with
+    the provider, so a failed notification email is just logged and
+    swallowed there, never allowed to make a real booking look failed."""
+    settings.validate_resend()
+    resend.api_key = settings.resend_api_key
+
+    try:
+        resend.Emails.send(
+            {
+                "from": settings.resend_from_email,
+                "to": to_email,
+                "subject": (
+                    f"Your {booking_type} booking is confirmed — {origin_iata} → {destination_iata}"
+                ),
+                "text": (
+                    f"Your {booking_type} booking for {origin_iata} → {destination_iata} "
+                    "is confirmed.\n\n"
+                    f"Provider reference: {provider_booking_reference}\n\n"
+                    "Keep this reference for your records."
+                ),
+            }
+        )
+    except Exception as e:
+        raise EmailSendError(f"Resend API call failed: {e}") from e
+
+    logger.info("Booking confirmation email sent")
