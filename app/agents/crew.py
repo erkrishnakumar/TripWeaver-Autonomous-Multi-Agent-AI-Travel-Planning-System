@@ -24,6 +24,9 @@ consistent "structured contracts over parsed text" convention.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
 from crewai import Crew, Process, Task
 
 from app.agents.planner import build_planner_agent
@@ -35,8 +38,22 @@ from app.agents.researcher import (
 from app.agents.schemas import BudgetCheckResult, PlanOutput, ResearchOutput
 from app.config import settings
 
+if TYPE_CHECKING:
+    from crewai.tasks.task_output import TaskOutput
 
-def build_research_crew(trip_request_summary: str, car_rental_override: str | None = None) -> Crew:
+# Every research Task below is given a matching `name=` (see each Task's
+# name= kwarg) so a task_callback can identify which one just finished via
+# TaskOutput.name -- output.agent can't be used for this, since all five
+# gather agents share the same role ("Travel Researcher", see
+# build_researcher_agent()) and only differ in which LLM backs them.
+RESEARCH_TASK_NAMES = ("flight", "hotel", "car_rental", "context", "format")
+
+
+def build_research_crew(
+    trip_request_summary: str,
+    car_rental_override: str | None = None,
+    task_callback: Callable[[TaskOutput], None] | None = None,
+) -> Crew:
     """Build the single-agent Crew that researches flights/hotels/weather/
     visa/ground-transport for a trip.
 
@@ -110,6 +127,7 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
     # prior task's raw output — see Crew._get_context()/NOT_SPECIFIED in
     # crewai/crew.py and crewai/task.py.
     flight_task = Task(
+        name="flight",
         description=(
             "Find the single best flight offer for this trip request using the "
             "Search Flights tool.\n\n"
@@ -137,6 +155,7 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
     )
 
     hotel_task = Task(
+        name="hotel",
         description=(
             "Find the single best hotel listing for this trip request using the "
             "Search Hotels tool.\n\n"
@@ -165,6 +184,7 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
     )
 
     car_rental_task = Task(
+        name="car_rental",
         description=(
             "Decide whether a car rental is useful for this trip request, using "
             "the Search Car Rentals tool (and Get Car Rental Quote if you select "
@@ -205,6 +225,7 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
     )
 
     context_task = Task(
+        name="context",
         description=(
             "Gather weather, visa, and ground-transport context for this trip "
             "request using the Get Weather Forecast, Check Visa Requirements, and "
@@ -229,6 +250,7 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
     )
 
     format_task = Task(
+        name="format",
         description=(
             "Convert the research findings given to you as context into the "
             "required structured format. Do not call any tools and do not invent "
@@ -263,6 +285,7 @@ def build_research_crew(trip_request_summary: str, car_rental_override: str | No
         tasks=[flight_task, hotel_task, car_rental_task, context_task, format_task],
         process=Process.sequential,
         verbose=True,
+        task_callback=task_callback,
     )
 
 
