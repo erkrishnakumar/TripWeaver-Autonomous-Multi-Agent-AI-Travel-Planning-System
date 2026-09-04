@@ -55,18 +55,25 @@ import asyncio
 import re
 import sys
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import date as date_cls
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from crewai.events import (
+    AgentExecutionStartedEvent,
+    ToolUsageErrorEvent,
+    ToolUsageFinishedEvent,
+    ToolUsageStartedEvent,
+    crewai_event_bus,
+)
 from crewai.flow.flow import Flow, listen, start
 from pydantic import BaseModel, Field, ValidationError
 
 from app.agents.budget import validate_budget
-from app.agents.crew import build_planning_crew, build_research_crew
+from app.agents.crew import RESEARCH_TASK_NAMES, build_planning_crew, build_research_crew
 from app.agents.schemas import BudgetCheckResult, PlanOutput, ResearchOutput
 from app.db.models import Trip
 from app.db.models.enums import TripStatus
@@ -89,6 +96,17 @@ from app.tools.schemas import (
 
 if TYPE_CHECKING:
     from crewai.crews.crew_output import CrewOutput
+    from crewai.tasks.task_output import TaskOutput
+
+
+def _truncate_text(value: Any, limit: int = 2000) -> str:
+    """Renders a value as a display string capped at `limit` chars -- a
+    tool's raw output/error can be many KB (a full flight-search JSON
+    blob, e.g.) and would otherwise bloat the audit_log table storing
+    what's meant to be a live activity feed, not the system of record for
+    the underlying data (the real option/booking rows created later are)."""
+    text = value if isinstance(value, str) else str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 class TripPlanningState(BaseModel):
@@ -230,6 +248,140 @@ class TripPlanningFlow(Flow[TripPlanningState]):
             "as the tool returns it, with no invented values."
         )
 
+    def _make_research_progress_callback(
+        self, loop: asyncio.AbstractEventLoop
+    ) -> Callable[[TaskOutput], None]:
+        """Builds the sync task_callback build_research_crew() invokes after
+        each of the 5 research Tasks finishes -- so a trip stuck in
+        "researching" for a while shows which sub-step it's actually on
+        (flight/hotel/car rental/context/format) instead of one opaque
+        spinner. See RESEARCH_TASK_NAMES/each Task's name= in crew.py for
+        why TaskOutput.name is the only reliable way to tell them apart.
+
+        CrewAI's kickoff_async() runs the whole (synchronous) crew on a
+        worker thread via asyncio.to_thread() -- this callback fires on
+        THAT thread, not the event loop driving this coroutine, so it can't
+        just `await log_stage_event(...)` directly. run_coroutine_threadsafe
+        schedules the write back onto the original loop and blocks this
+        worker thread until it's actually committed, preserving the same
+        ordering guarantee log_stage_event()'s own sequence numbering
+        depends on (see its docstring)."""
+
+        def _on_task_complete(output: TaskOutput) -> None:
+            if output.name not in RESEARCH_TASK_NAMES:
+                return
+
+            async def _write() -> None:
+                async with get_session() as session:
+                    await log_stage_event(
+                        session, self.state.trip_id, f"research.{output.name}_completed"
+                    )
+                    await session.commit()
+
+            try:
+                asyncio.run_coroutine_threadsafe(_write(), loop).result(timeout=10)
+            except Exception:  # noqa: BLE001 -- a progress-log hiccup must never fail research itself
+                pass
+
+        return _on_task_complete
+
+    @contextmanager
+    def _capture_agent_activity(self, loop: asyncio.AbstractEventLoop) -> Iterator[None]:
+        """Subscribes to CrewAI's event bus for the duration of ONE
+        crew.kickoff_async() call, writing a live "agent.*" AuditLog row
+        for every agent-started / tool-started / tool-finished / tool-error
+        event -- this is what lets the frontend's Activity feed show which
+        specific agent/tool is running right now, not just the coarse
+        research.*_completed milestones _make_research_progress_callback()
+        above already logs. Same asyncio.run_coroutine_threadsafe bridge as
+        that method -- see its docstring for why a sync CrewAI callback
+        can't just `await` the write directly.
+
+        Registered/unregistered around each crew.kickoff_async() call, not
+        once per process: crewai_event_bus is a process-wide singleton, so
+        a handler left registered after this trip's crew finishes would
+        keep firing -- and double-firing on the next registration -- for
+        every subsequent trip this same worker ever processes. Flushes the
+        bus before unregistering -- verified live that emit() dispatches
+        sync handlers on a background ThreadPoolExecutor and returns
+        immediately, so skipping the flush could silently drop the last
+        event or two emitted right as the crew finishes.
+        """
+
+        def _write(event_type: str, payload: dict[str, Any]) -> None:
+            async def _do_write() -> None:
+                async with get_session() as session:
+                    await log_stage_event(session, self.state.trip_id, event_type, payload=payload)
+                    await session.commit()
+
+            try:
+                asyncio.run_coroutine_threadsafe(_do_write(), loop).result(timeout=10)
+            except Exception:  # noqa: BLE001 -- a progress-log hiccup must never fail the real run
+                pass
+
+        def _on_agent_started(source: Any, event: AgentExecutionStartedEvent) -> None:
+            _write(
+                "agent.started",
+                {
+                    "agent_role": event.agent.role,
+                    "task_name": getattr(event.task, "name", None)
+                    or getattr(event.task, "description", None),
+                },
+            )
+
+        def _on_tool_started(source: Any, event: ToolUsageStartedEvent) -> None:
+            _write(
+                "agent.tool_started",
+                {
+                    "agent_role": event.agent_role,
+                    "tool_name": event.tool_name,
+                    "tool_args": event.tool_args
+                    if isinstance(event.tool_args, dict)
+                    else _truncate_text(event.tool_args),
+                },
+            )
+
+        def _on_tool_finished(source: Any, event: ToolUsageFinishedEvent) -> None:
+            _write(
+                "agent.tool_completed",
+                {
+                    "agent_role": event.agent_role,
+                    "tool_name": event.tool_name,
+                    "output": _truncate_text(event.output),
+                },
+            )
+
+        def _on_tool_error(source: Any, event: ToolUsageErrorEvent) -> None:
+            _write(
+                "agent.tool_failed",
+                {
+                    "agent_role": event.agent_role,
+                    "tool_name": event.tool_name,
+                    "error": _truncate_text(event.error),
+                },
+            )
+
+        handlers: list[tuple[type, Any]] = [
+            (AgentExecutionStartedEvent, _on_agent_started),
+            (ToolUsageStartedEvent, _on_tool_started),
+            (ToolUsageFinishedEvent, _on_tool_finished),
+            (ToolUsageErrorEvent, _on_tool_error),
+        ]
+        for event_type, handler in handlers:
+            crewai_event_bus.on(event_type)(handler)
+        try:
+            yield
+        finally:
+            # crewai_event_bus.emit() dispatches sync handlers on a
+            # background ThreadPoolExecutor and returns immediately --
+            # verified live, not assumed: without this flush, an event
+            # emitted right before crew.kickoff_async() returns could
+            # still be queued (not yet run) when .off() below removes the
+            # handler, silently dropping that last activity-log write.
+            crewai_event_bus.flush(timeout=10)
+            for event_type, handler in handlers:
+                crewai_event_bus.off(event_type, handler)
+
     @start()
     async def research(self) -> ResearchOutput:
         """Kick off the research Crew -- now resumability-aware: if this
@@ -299,9 +451,11 @@ class TripPlanningFlow(Flow[TripPlanningState]):
         crew = build_research_crew(
             self._trip_request_summary(),
             car_rental_override=self._car_rental_sandbox_override_note(),
+            task_callback=self._make_research_progress_callback(asyncio.get_running_loop()),
         )
         try:
-            crew_output = cast("CrewOutput", await crew.kickoff_async())
+            with self._capture_agent_activity(asyncio.get_running_loop()):
+                crew_output = cast("CrewOutput", await crew.kickoff_async())
             research_output = cast(ResearchOutput, crew_output.pydantic)
             assert isinstance(research_output, ResearchOutput)
         except (ValidationError, AssertionError) as e:
@@ -374,7 +528,8 @@ class TripPlanningFlow(Flow[TripPlanningState]):
             budget_check,
         )
         try:
-            crew_output = cast("CrewOutput", await crew.kickoff_async())
+            with self._capture_agent_activity(asyncio.get_running_loop()):
+                crew_output = cast("CrewOutput", await crew.kickoff_async())
             plan_output = cast(PlanOutput, crew_output.pydantic)
             assert isinstance(plan_output, PlanOutput)
         except (ValidationError, AssertionError) as e:
@@ -750,8 +905,9 @@ def capture_output_to_log_file(label: str) -> Iterator[Path]:
 
     logs_dir = Path(__file__).resolve().parent.parent.parent / "logs"
     logs_dir.mkdir(exist_ok=True)
-    log_path = logs_dir / f"{label}_{datetime.now():%Y%m%d_%H%M%S}.log"
-    log_file = open(log_path, "w", encoding="utf-8", errors="replace")
+    log_path = logs_dir / f"{label}.log"
+    log_file = open(log_path, "a", encoding="utf-8", errors="replace")
+    log_file.write(f"\n\n===== Attempt started {datetime.now():%Y-%m-%d %H:%M:%S} =====\n\n")
     orig_stdout, orig_stderr = sys.stdout, sys.stderr
     sys.stdout = _TeeStream(orig_stdout, _AnsiStrippingWriter(log_file))
     sys.stderr = _TeeStream(orig_stderr, _AnsiStrippingWriter(log_file))

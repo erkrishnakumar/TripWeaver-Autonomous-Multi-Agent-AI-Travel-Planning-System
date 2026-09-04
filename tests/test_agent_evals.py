@@ -178,7 +178,7 @@ def _patch_crews(monkeypatch, research_output: ResearchOutput, plan_output: Plan
     monkeypatch.setattr(
         flow_module,
         "build_research_crew",
-        lambda summary, car_rental_override=None: _FakeCrew(research_output),
+        lambda summary, car_rental_override=None, task_callback=None: _FakeCrew(research_output),
     )
     monkeypatch.setattr(
         flow_module,
@@ -247,7 +247,7 @@ class TestGracefulDegradationOnProviderErrors:
         monkeypatch.setattr(
             flow_module,
             "build_research_crew",
-            lambda summary, car_rental_override=None: _ExplodingCrew(
+            lambda summary, car_rental_override=None, task_callback=None: _ExplodingCrew(
                 RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded")
             ),
         )
@@ -275,7 +275,9 @@ class TestGracefulDegradationOnProviderErrors:
         monkeypatch.setattr(
             flow_module,
             "build_research_crew",
-            lambda summary, car_rental_override=None: _FakeCrew(research_output),
+            lambda summary, car_rental_override=None, task_callback=None: _FakeCrew(
+                research_output
+            ),
         )
         monkeypatch.setattr(
             flow_module,

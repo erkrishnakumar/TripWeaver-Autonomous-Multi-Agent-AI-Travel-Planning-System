@@ -4,11 +4,19 @@ import { useEffect } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { BookingCard } from '@/components/booking-card'
+import { ResearchProgress } from '@/components/research-progress'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { extractErrorMessage, tripsApi } from '@/lib/api'
 import { rememberTrip } from '@/lib/trip-history'
+
+function humanizeEventType(eventType: string): string {
+  return eventType
+    .replace(/^research\./, 'Research: ')
+    .replace(/^agent\./, '')
+    .replace(/_/g, ' ')
+}
 
 const ACTIVE_STATUSES = new Set(['draft', 'researching', 'planning'])
 
@@ -114,24 +122,7 @@ export function TripDetailPage() {
         <StatusBadge status={trip.status} />
       </div>
 
-      {ACTIVE_STATUSES.has(trip.status) && (
-        <Card className="animate-in-up border-primary/20 bg-primary/[0.04]">
-          <CardContent className="flex items-center gap-3 py-4">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-              <RefreshCw className="h-4 w-4 animate-spin" />
-            </span>
-            <p className="text-sm text-muted-foreground">
-              TripWeaver is{' '}
-              {trip.status === 'draft'
-                ? 'getting started'
-                : trip.status === 'researching'
-                  ? 'researching flights, hotels and cars'
-                  : 'planning your itinerary'}
-              . This page updates automatically.
-            </p>
-          </CardContent>
-        </Card>
-      )}
+      <ResearchProgress status={trip.status} auditLog={auditLogQuery.data} />
 
       {trip.status === 'awaiting_approval' && (
         <Card className="animate-in-up border-warning/30 bg-warning/[0.06] shadow-glow">
@@ -186,7 +177,7 @@ export function TripDetailPage() {
                   <span className="absolute left-[3px] top-3.5 bottom-[-1rem] w-px bg-border last:hidden" />
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-sm font-medium capitalize">
-                      {entry.event_type.replace(/_/g, ' ')}
+                      {humanizeEventType(entry.event_type)}
                     </span>
                     <span className="text-xs text-muted-foreground">
                       {new Date(entry.created_at).toLocaleString()}

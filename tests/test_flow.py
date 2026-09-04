@@ -17,6 +17,8 @@ docstring, not a mock of anything that will exist post-Phase-8.
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 
@@ -28,8 +30,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import app.agents.flow as flow_module
 from app.agents.schemas import PlanOutput, ResearchOutput
 from app.db.base import Base
-from app.db.models import Booking, Trip
+from app.db.models import AuditLog, Booking, Trip
 from app.db.models.enums import BookingStatus
+from app.tools.create_trip import create_trip
 from app.tools.schemas import (
     CabinClass,
     CarQuoteResult,
@@ -149,7 +152,7 @@ def _patch_crews(monkeypatch, research_output: ResearchOutput, plan_output: Plan
     monkeypatch.setattr(
         flow_module,
         "build_research_crew",
-        lambda summary, car_rental_override=None: _FakeCrew(research_output),
+        lambda summary, car_rental_override=None, task_callback=None: _FakeCrew(research_output),
     )
     monkeypatch.setattr(
         flow_module,
@@ -606,3 +609,151 @@ class TestTripRequestSummaryCarRentalSignal:
         summary = flow._trip_request_summary()
 
         assert "car rental" not in summary
+
+
+class TestAgentActivityCapture:
+    """_capture_agent_activity() -- the live "agent.*" event logging added
+    so the frontend's Activity feed can show which specific agent/tool is
+    running right now, not just the coarse research.*_completed
+    milestones. Drives the REAL crewai_event_bus with real event objects
+    (not the _FakeCrew/_patch_crews mocks the rest of this file uses,
+    which never touch the event bus at all) -- this is the one thing that
+    would have caught the keep_alive-style mistake of trusting source
+    code over an actual run."""
+
+    async def test_agent_and_tool_events_are_logged_with_real_event_objects(
+        self, sqlite_session_override
+    ):
+        from crewai import Agent, Task
+        from crewai.events import (
+            AgentExecutionStartedEvent,
+            ToolUsageFinishedEvent,
+            ToolUsageStartedEvent,
+            crewai_event_bus,
+        )
+
+        session_factory = sqlite_session_override
+        async with session_factory() as session:
+            trip = await create_trip(
+                session,
+                origin_iata="JFK",
+                destination_iata="ATL",
+                depart_date=date.today() + timedelta(days=30),
+                adults=1,
+            )
+            await session.commit()
+            trip_id = str(trip.id)
+
+        flow = flow_module.TripPlanningFlow()
+        flow.state.trip_id = trip_id
+
+        agent = Agent(
+            role="Travel Researcher",
+            goal="test goal",
+            backstory="test backstory",
+            llm="gpt-4o-mini",
+        )
+        task = Task(description="Find a flight.", expected_output="A flight offer.", agent=agent)
+        loop = asyncio.get_running_loop()
+
+        def _run_and_emit() -> None:
+            import time
+
+            with flow._capture_agent_activity(loop):
+                crewai_event_bus.emit(
+                    agent,
+                    AgentExecutionStartedEvent(agent=agent, task=task, tools=[], task_prompt="go"),
+                )
+                time.sleep(0.02)  # real CrewAI execution never fires these back-to-back
+                crewai_event_bus.emit(
+                    agent,
+                    ToolUsageStartedEvent(
+                        agent_role="Travel Researcher",
+                        tool_name="search_flights",
+                        tool_args={"origin": "JFK", "destination": "ATL"},
+                    ),
+                )
+                time.sleep(0.02)
+                crewai_event_bus.emit(
+                    agent,
+                    ToolUsageFinishedEvent(
+                        agent_role="Travel Researcher",
+                        tool_name="search_flights",
+                        tool_args={"origin": "JFK", "destination": "ATL"},
+                        started_at=datetime.now(),
+                        finished_at=datetime.now(),
+                        output='{"offers": []}',
+                    ),
+                )
+
+        # Run on a separate thread, same as the real caller
+        # (crew.kickoff_async() runs the whole crew via asyncio.to_thread())
+        # -- _capture_agent_activity's writes are bridged back onto THIS
+        # test's own event loop via run_coroutine_threadsafe, which can
+        # only actually run while this coroutine is awaiting something,
+        # not while it's itself executing synchronous code on this thread.
+        await asyncio.to_thread(_run_and_emit)
+
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AuditLog)
+                        .where(AuditLog.trip_id == uuid.UUID(trip_id))
+                        .order_by(AuditLog.sequence)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        event_types = [r.event_type for r in rows]
+        assert event_types == ["agent.started", "agent.tool_started", "agent.tool_completed"]
+        assert rows[0].payload["agent_role"] == "Travel Researcher"
+        assert rows[1].payload["tool_name"] == "search_flights"
+        assert rows[1].payload["tool_args"] == {"origin": "JFK", "destination": "ATL"}
+        assert rows[2].payload["output"] == '{"offers": []}'
+
+    async def test_handlers_are_unregistered_after_the_context_exits(self, sqlite_session_override):
+        """The event bus is a process-wide singleton -- a handler left
+        registered after one trip's crew finishes would keep firing (and
+        double-firing on the next trip's registration) for every
+        subsequent trip this same worker ever processes."""
+        from crewai.events import ToolUsageStartedEvent, crewai_event_bus
+
+        session_factory = sqlite_session_override
+        async with session_factory() as session:
+            trip = await create_trip(
+                session,
+                origin_iata="JFK",
+                destination_iata="ATL",
+                depart_date=date.today() + timedelta(days=30),
+                adults=1,
+            )
+            await session.commit()
+            trip_id = str(trip.id)
+
+        flow = flow_module.TripPlanningFlow()
+        flow.state.trip_id = trip_id
+        loop = asyncio.get_running_loop()
+
+        with flow._capture_agent_activity(loop):
+            pass  # register then immediately unregister on exit
+
+        crewai_event_bus.emit(
+            None,
+            ToolUsageStartedEvent(agent_role="x", tool_name="y", tool_args={}),
+        )
+        await asyncio.sleep(0.05)  # let any (unwanted) scheduled write settle
+
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AuditLog).where(AuditLog.trip_id == uuid.UUID(trip_id))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert rows == []
