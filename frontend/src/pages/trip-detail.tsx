@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, CalendarDays, RefreshCw, Users, Wallet } from 'lucide-react'
-import { useEffect } from 'react'
+import { ArrowLeft, CalendarDays, Loader2, RefreshCw, Users, Wallet } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { BookingCard } from '@/components/booking-card'
@@ -25,13 +25,38 @@ export function TripDetailPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
+  // POST /trips/{id}/proceed only enqueues propose_trip_bookings -- the
+  // trip's status stays "awaiting_approval" until that background job
+  // actually finishes re-verifying everything with the provider, which can
+  // take a while. Without this flag, the polling below would (correctly)
+  // see "awaiting_approval" both immediately before AND after the click and
+  // never realize it should keep watching for the status to actually change.
+  const [isProposing, setIsProposing] = useState(false)
+
   const tripQuery = useQuery({
     queryKey: ['trip', tripId],
     queryFn: () => tripsApi.get(tripId!),
     enabled: !!tripId,
-    refetchInterval: (query) =>
-      query.state.data && ACTIVE_STATUSES.has(query.state.data.status) ? 4000 : false,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      if (!status) return false
+      if (ACTIVE_STATUSES.has(status)) return 4000
+      if (status === 'awaiting_approval' && isProposing) return 3000
+      return false
+    },
   })
+
+  useEffect(() => {
+    if (isProposing && tripQuery.data && tripQuery.data.status !== 'awaiting_approval') {
+      // The background propose job just resolved (approved/failed) --
+      // pull in whatever it actually produced instead of waiting for the
+      // next unrelated refetch.
+      setIsProposing(false)
+      queryClient.invalidateQueries({ queryKey: ['bookings', tripId] })
+      queryClient.invalidateQueries({ queryKey: ['audit-log', tripId] })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tripQuery.data?.status])
 
   const bookingsQuery = useQuery({
     queryKey: ['bookings', tripId],
@@ -45,7 +70,10 @@ export function TripDetailPage() {
     enabled: !!tripId,
     refetchInterval: () => {
       const status = tripQuery.data?.status
-      return status && ACTIVE_STATUSES.has(status) ? 4000 : false
+      if (!status) return false
+      if (ACTIVE_STATUSES.has(status)) return 4000
+      if (status === 'awaiting_approval' && isProposing) return 3000
+      return false
     },
   })
 
@@ -56,7 +84,8 @@ export function TripDetailPage() {
   const proceedMutation = useMutation({
     mutationFn: () => tripsApi.proceed(tripId!),
     onSuccess: () => {
-      toast.success('Approved — bookings are being proposed.')
+      toast.success("Approved — verifying real prices and proposing bookings…")
+      setIsProposing(true)
       queryClient.invalidateQueries({ queryKey: ['trip', tripId] })
       queryClient.invalidateQueries({ queryKey: ['audit-log', tripId] })
     },
@@ -130,19 +159,27 @@ export function TripDetailPage() {
             <CardTitle className="font-display text-lg">Gate 1: Approve the plan</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
-            <p className="text-sm text-muted-foreground">
-              Research is done. Approve to have TripWeaver propose specific flight, hotel, and car
-              bookings for you to review.
-            </p>
-            <div>
-              <Button
-                size="lg"
-                disabled={proceedMutation.isPending}
-                onClick={() => proceedMutation.mutate()}
-              >
-                {proceedMutation.isPending ? 'Approving…' : 'Approve & propose bookings'}
-              </Button>
-            </div>
+            {isProposing || proceedMutation.isPending ? (
+              <div className="flex items-center gap-3 py-1">
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                <p className="text-sm text-muted-foreground">
+                  Verifying real prices with the provider and proposing bookings — this page
+                  updates automatically.
+                </p>
+              </div>
+            ) : (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  Research is done. Approve to have TripWeaver propose specific flight, hotel, and
+                  car bookings for you to review.
+                </p>
+                <div>
+                  <Button size="lg" onClick={() => proceedMutation.mutate()}>
+                    Approve &amp; propose bookings
+                  </Button>
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
       )}
@@ -152,7 +189,11 @@ export function TripDetailPage() {
           <h2 className="mb-3 font-display text-lg font-bold">Proposed bookings</h2>
           {bookingsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading bookings…</p>}
           {bookingsQuery.data && bookingsQuery.data.length === 0 && (
-            <p className="text-sm text-muted-foreground">No bookings proposed yet — check back shortly.</p>
+            <p className="text-sm text-muted-foreground">
+              {trip.status === 'failed'
+                ? "TripWeaver couldn't propose any bookings — see Activity below for why (usually a provider verification failure)."
+                : 'No bookings proposed yet — check back shortly.'}
+            </p>
           )}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             {bookingsQuery.data?.map((booking) => (
