@@ -662,7 +662,17 @@ class TripPlanningFlow(Flow[TripPlanningState]):
                         self.state.flight_booking = flight_result
                         await session.commit()
 
-            if research_output.selected_hotel is not None:
+            # search_result_id empty (not just None) means the formatter
+            # agent reported a hotel finding without ever relaying a real
+            # id -- its own prompt says to leave the WHOLE object out in
+            # that case (see format_task in crew.py), but a model doesn't
+            # always follow that faithfully. Guard here too rather than
+            # trusting the prompt alone: an empty id would otherwise reach
+            # get_hotel_rate() and burn a doomed API call before failing.
+            if (
+                research_output.selected_hotel is not None
+                and research_output.selected_hotel.search_result_id
+            ):
                 from datetime import date as date_cls
 
                 check_in = date_cls.fromisoformat(self.state.depart_date)
@@ -696,6 +706,15 @@ class TripPlanningFlow(Flow[TripPlanningState]):
                     else:
                         self.state.hotel_booking = hotel_result
                         await session.commit()
+            elif (
+                research_output.selected_hotel is not None
+                and not research_output.selected_hotel.search_result_id
+            ):
+                self._add_error(
+                    "Hotel proposal skipped: the research step reported a hotel "
+                    f"({research_output.selected_hotel.hotel_name!r}) without a usable "
+                    "search_result_id, so it could not be re-verified with the provider."
+                )
 
             for car_rate in research_output.selected_car_rentals:
                 driver_fields = (
